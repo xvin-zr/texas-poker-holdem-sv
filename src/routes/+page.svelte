@@ -586,11 +586,6 @@
             <p class="text-muted-foreground">
               {playerName(allInWait.triggerPlayerId)} 已全押，本阶段行动轮立即中断。待响应者只能全押或弃牌。
             </p>
-            {#if humanAllInPending}
-              <Badge variant="destructive" data-testid="all-in-countdown">
-                人类倒计时：{allInHumanRemaining}s
-              </Badge>
-            {/if}
             <div class="flex flex-wrap gap-2">
               {#each allInWait.responderIds as responderId (responderId)}
                 <Badge variant="outline" data-testid="all-in-responder">
@@ -610,6 +605,9 @@
               <AlertDialogDescription>
                 {playerName(allInWait.triggerPlayerId)} 已全押，你只能全押或弃牌。
               </AlertDialogDescription>
+              <Badge variant="destructive" data-testid="all-in-countdown">
+                人类倒计时：{allInHumanRemaining}s
+              </Badge>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogAction
