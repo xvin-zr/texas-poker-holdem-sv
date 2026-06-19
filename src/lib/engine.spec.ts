@@ -46,6 +46,42 @@ const foldSurvive = (state: GameState, playerId: PlayerId, nextDeck?: Card[]) =>
     nextDeck,
   }).state;
 };
+const callAllFour = (state: GameState) => {
+  let result = { state, effects: [] } as ReturnType<typeof engine>;
+  for (const playerId of ['human', 'ai-1', 'ai-2', 'ai-3'] as const) {
+    result = engine(result.state, {
+      type: 'player-action',
+      playerId,
+      decision: { action: 'call' },
+    });
+  }
+  return result;
+};
+const playToShowdown = (deck: Card[] = defaultDeck) => {
+  let result = {
+    state: engine(initialState, { type: 'start-game', deck }).state,
+    effects: [],
+  } as ReturnType<typeof engine>;
+  result = callAllFour(result.state);
+  result = callAllFour(result.state);
+  result = callAllFour(result.state);
+  return callAllFour(result.state);
+};
+const tieDeck: Card[] = [
+  c('A', '♠'),
+  c('K', '♠'),
+  c('Q', '♥'),
+  c('J', '♥'),
+  c('10', '♦'),
+  c('9', '♦'),
+  c('8', '♣'),
+  c('7', '♣'),
+  c('2', '♠'),
+  c('3', '♠'),
+  c('4', '♠'),
+  c('5', '♠'),
+  c('6', '♠'),
+];
 
 describe('引擎 reducer', () => {
   it('开始游戏会进入第一手 preflop 初始状态', () => {
@@ -113,9 +149,9 @@ describe('引擎 reducer', () => {
     expect(state.stage).toBe('flop');
     expect(state.currentActorId).toBe('human');
     expect(state.communityCards.map((card) => `${card.rank}${card.suit}`)).toEqual([
-      '2♠',
-      '3♠',
-      '4♠',
+      'A♦',
+      '6♦',
+      '4♣',
     ]);
 
     state = act(state, 'human');
@@ -255,7 +291,9 @@ describe('弃牌开枪', () => {
     expect(voided.stage).toBe('preflop');
     expect(voided.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
     // 其他人下注不退还：新一手 ante 重置为 1（本手下注不退还体现为本手作废重开）
-    expect(voided.players.filter((player) => player.alive).every((player) => player.betThisHand === 1)).toBe(true);
+    expect(
+      voided.players.filter((player) => player.alive).every((player) => player.betThisHand === 1),
+    ).toBe(true);
     expect(voided.players.filter((player) => player.alive)).toHaveLength(3);
     expect(voided.actionHistory).toEqual([]);
     expect(voided.currentActorId).toBe('human');
@@ -305,9 +343,11 @@ describe('弃牌开枪', () => {
       decision: { action: 'fold' },
     }).state;
     expect(
-      engine(folded1, { type: 'fold-shoot-expired', playerId: 'human', roll: 0.124 }).state.players.find(
-        (player) => player.id === 'human',
-      )?.alive,
+      engine(folded1, {
+        type: 'fold-shoot-expired',
+        playerId: 'human',
+        roll: 0.124,
+      }).state.players.find((player) => player.id === 'human')?.alive,
     ).toBe(false);
     const folded2 = engine(started, {
       type: 'player-action',
@@ -315,9 +355,11 @@ describe('弃牌开枪', () => {
       decision: { action: 'fold' },
     }).state;
     expect(
-      engine(folded2, { type: 'fold-shoot-expired', playerId: 'human', roll: 0.126 }).state.players.find(
-        (player) => player.id === 'human',
-      )?.alive,
+      engine(folded2, {
+        type: 'fold-shoot-expired',
+        playerId: 'human',
+        roll: 0.126,
+      }).state.players.find((player) => player.id === 'human')?.alive,
     ).toBe(true);
   });
 
@@ -375,6 +417,119 @@ describe('弃牌开枪', () => {
     }).state;
 
     expect(ignored).toEqual(folded);
+  });
+});
+
+describe('摊牌', () => {
+  it('河牌行动轮结束会进入摊牌，翻到 river 并标出赢家与输者', () => {
+    const result = playToShowdown();
+
+    expect(result.state.status).toBe('showdown');
+    expect(result.state.currentActorId).toBe(null);
+    expect(result.state.communityCards).toHaveLength(5);
+    expect(result.effects).toEqual([
+      {
+        type: 'schedule-showdown-shoot',
+        timerId: 'showdown-shoot',
+        loserIds: ['ai-1', 'ai-2', 'ai-3'],
+      },
+    ]);
+    expect(result.state.showdown?.entries).toHaveLength(4);
+    expect(result.state.showdown?.entries.find((entry) => entry.playerId === 'human')?.result).toBe(
+      'winner',
+    );
+    expect(result.state.showdown?.loserIds).toEqual(['ai-1', 'ai-2', 'ai-3']);
+    expect(result.state.players.every((player) => player.betThisHand === 5)).toBe(true);
+  });
+
+  it('Fold 玩家不参与摊牌比较，底牌状态不被引擎改写', () => {
+    const started = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+    const foldedHole = started.players.find((player) => player.id === 'ai-1')?.holeCards;
+    const river = {
+      ...started,
+      stage: 'river',
+      communityCards: defaultDeck.slice(8, 13),
+      deck: [],
+      currentActorId: 'human',
+      actedThisStage: ['ai-2', 'ai-3'],
+      players: started.players.map((player) =>
+        player.id === 'ai-1'
+          ? { ...player, folded: true, betThisHand: 4 }
+          : { ...player, betThisHand: player.id === 'human' ? 4 : 5 },
+      ),
+    } satisfies GameState;
+
+    const result = engine(river, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'call' },
+    }).state;
+
+    expect(result.status).toBe('showdown');
+    expect(result.showdown?.entries.map((entry) => entry.playerId)).not.toContain('ai-1');
+    expect(result.players.find((player) => player.id === 'ai-1')?.holeCards).toEqual(foldedHole);
+  });
+
+  it('全平局无人开枪，摊牌结算后直接进入下一手', () => {
+    const result = playToShowdown(tieDeck);
+    const showdown = result.state;
+
+    expect(result.effects).toEqual([]);
+    expect(showdown.showdown?.loserIds).toEqual([]);
+    expect(showdown.showdown?.entries.every((entry) => entry.result === 'tie')).toBe(true);
+
+    const next = engine(showdown, {
+      type: 'showdown-shoot-expired',
+      rolls: {},
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(next.status).toBe('playing');
+    expect(next.stage).toBe('preflop');
+    expect(next.players.every((player) => player.alive)).toBe(true);
+    expect(next.players.every((player) => player.betThisHand === 1)).toBe(true);
+    expect(next.actionHistory).toEqual([]);
+  });
+
+  it('所有非最大者同时开枪，一次结算可让复数输者死亡并触发胜利', () => {
+    const showdown = playToShowdown().state;
+
+    const won = engine(showdown, {
+      type: 'showdown-shoot-expired',
+      rolls: { 'ai-1': 0, 'ai-2': 0, 'ai-3': 0 },
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(won.status).toBe('won');
+    expect(won.winnerId).toBe('human');
+    expect(won.players.filter((player) => !player.alive).map((player) => player.id)).toEqual([
+      'ai-1',
+      'ai-2',
+      'ai-3',
+    ]);
+  });
+
+  it('摊牌后仍有两名以上存活者会移除死者并重置本手状态', () => {
+    const showdown = playToShowdown().state;
+
+    const next = engine(showdown, {
+      type: 'showdown-shoot-expired',
+      rolls: { 'ai-1': 0, 'ai-2': 0, 'ai-3': 0.999 },
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(next.status).toBe('playing');
+    expect(next.stage).toBe('preflop');
+    expect(next.players.filter((player) => player.alive).map((player) => player.id)).toEqual([
+      'human',
+      'ai-3',
+    ]);
+    expect(
+      next.players.filter((player) => player.alive).every((player) => player.betThisHand === 1),
+    ).toBe(true);
+    expect(next.communityCards).toEqual([]);
+    expect(next.actionHistory).toEqual([]);
+    expect(next.currentActorId).toBe('human');
   });
 });
 

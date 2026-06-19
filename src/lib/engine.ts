@@ -16,9 +16,11 @@ export type EngineError = 'missing-decision-input' | 'invalid-card-count';
 
 // 弃牌开枪外置定时器：引擎发 effect 让 UI 层 2.5s 后回灌 fold-shoot-expired 事件。
 export const FOLD_SHOOT_DELAY_MS = 2500;
+export const SHOWDOWN_SHOOT_DELAY_MS = 2500;
 export const FOLD_SHOOT_CAP_PROBABILITY = 0.95;
 export type EngineEffect =
-  | { type: 'schedule-fold-shoot'; playerId: PlayerId; timerId: string };
+  | { type: 'schedule-fold-shoot'; playerId: PlayerId; timerId: string }
+  | { type: 'schedule-showdown-shoot'; loserIds: PlayerId[]; timerId: string };
 export type HandCategory =
   | 'high-card'
   | 'one-pair'
@@ -34,6 +36,17 @@ export type HandRank = {
   category: HandCategory;
   primary: number[];
   kickers: number[];
+};
+
+export type ShowdownEntry = {
+  playerId: PlayerId;
+  hand: HandRank;
+  result: 'winner' | 'loser' | 'tie';
+};
+
+export type ShowdownState = {
+  entries: ShowdownEntry[];
+  loserIds: PlayerId[];
 };
 
 export type PublicPlayer = {
@@ -90,6 +103,7 @@ export type GameState = {
   pendingAllIn: boolean;
   // 弃牌开枪阻塞期间记录待开枪玩家，行动轮暂停直到 fold-shoot-expired 回灌。
   pendingFoldShoot: PlayerId | null;
+  showdown: ShowdownState | null;
   winnerId: PlayerId | null;
 };
 
@@ -102,6 +116,11 @@ export type GameEvent =
       type: 'fold-shoot-expired';
       playerId: PlayerId;
       roll: number;
+      nextDeck?: Card[];
+    }
+  | {
+      type: 'showdown-shoot-expired';
+      rolls: Partial<Record<PlayerId, number>>;
       nextDeck?: Card[];
     };
 
@@ -123,6 +142,7 @@ export const initialState: GameState = {
   actedThisStage: [],
   pendingAllIn: false,
   pendingFoldShoot: null,
+  showdown: null,
   winnerId: null,
 };
 
@@ -179,18 +199,18 @@ const rankValue: Record<Rank, number> = {
 
 export const defaultDeck: Card[] = [
   { rank: 'A', suit: '♠' },
+  { rank: 'A', suit: '♥' },
   { rank: 'K', suit: '♠' },
   { rank: 'Q', suit: '♥' },
-  { rank: 'J', suit: '♥' },
   { rank: '10', suit: '♦' },
   { rank: '9', suit: '♦' },
   { rank: '8', suit: '♣' },
   { rank: '7', suit: '♣' },
-  { rank: '2', suit: '♠' },
-  { rank: '3', suit: '♠' },
-  { rank: '4', suit: '♠' },
-  { rank: '5', suit: '♠' },
-  { rank: '6', suit: '♠' },
+  { rank: 'A', suit: '♦' },
+  { rank: '6', suit: '♦' },
+  { rank: '4', suit: '♣' },
+  { rank: '3', suit: '♣' },
+  { rank: '2', suit: '♥' },
 ];
 
 export function createDecisionInput(
@@ -290,6 +310,8 @@ export function engine(state: GameState, event: GameEvent): EngineResult {
   if (event.type === 'timer-expired') return { state, effects: [] };
   if (event.type === 'start-game')
     return { state: startGame(event.deck ?? defaultDeck), effects: [] };
+  if (event.type === 'showdown-shoot-expired')
+    return { state: applyShowdownShoot(state, event), effects: [] };
   if (state.status !== 'playing') return { state, effects: [] };
   if (event.type === 'fold-shoot-expired')
     return { state: applyFoldShoot(state, event), effects: [] };
@@ -316,19 +338,13 @@ function startGame(deck: Card[]): GameState {
   return dealNextHand(base, deck);
 }
 
-function applyDecision(
-  state: GameState,
-  playerId: PlayerId,
-  decision: Decision,
-): EngineResult {
+function applyDecision(state: GameState, playerId: PlayerId, decision: Decision): EngineResult {
   // ponytail: All-in 留到切片 5；本切片忽略误发事件，避免进入半实现状态。
   if (decision.action === 'all-in') return { state, effects: [] };
   if (decision.action === 'fold') return applyFold(state, playerId);
 
   const players = state.players.map((player) =>
-    player.id === playerId
-      ? { ...player, betThisHand: player.betThisHand + 1 }
-      : player,
+    player.id === playerId ? { ...player, betThisHand: player.betThisHand + 1 } : player,
   );
   const next: GameState = {
     ...state,
@@ -337,7 +353,7 @@ function applyDecision(
     actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision }],
     actedThisStage: [...new Set([...state.actedThisStage, playerId])],
   };
-  return { state: advance(next), effects: [] };
+  return withShowdownEffect(advance(next));
 }
 
 // 弃牌（非 All-in）：标记 folded、阻塞行动轮、外置 2.5s 开枪定时器。
@@ -350,7 +366,10 @@ function applyFold(state: GameState, playerId: PlayerId): EngineResult {
   const next: GameState = {
     ...state,
     players,
-    actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision: { action: 'fold' } }],
+    actionHistory: [
+      ...state.actionHistory,
+      { stage: state.stage!, playerId, decision: { action: 'fold' } },
+    ],
     actedThisStage: [...new Set([...state.actedThisStage, playerId])],
     currentActorId: null,
     pendingFoldShoot: playerId,
@@ -367,7 +386,11 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
   const died = event.roll < foldShootDeathProbability(player.betThisHand);
   if (!died) {
     // 存活：从弃牌者位置继续扫描下一活跃玩家，避免依赖 currentActorId=null 的隐式行为。
-    const surviving: GameState = { ...state, pendingFoldShoot: null, currentActorId: event.playerId };
+    const surviving: GameState = {
+      ...state,
+      pendingFoldShoot: null,
+      currentActorId: event.playerId,
+    };
     return advance(surviving);
   }
 
@@ -388,17 +411,99 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
 
   // 致死且 ≥2 存活：本手作废，洗牌进下一手（死者不参与，其他人下注不退还）。
   return dealNextHand(
-    { ...state, players, pendingFoldShoot: null, winnerId: null },
+    { ...state, players, pendingFoldShoot: null, showdown: null, winnerId: null },
+    event.nextDeck ?? defaultDeck,
+  );
+}
+
+function withShowdownEffect(state: GameState): EngineResult {
+  return {
+    state,
+    effects:
+      state.status === 'showdown' && state.showdown && state.showdown.loserIds.length > 0
+        ? [
+            {
+              type: 'schedule-showdown-shoot',
+              timerId: 'showdown-shoot',
+              loserIds: state.showdown.loserIds,
+            },
+          ]
+        : [],
+  };
+}
+
+function applyShowdownShoot(
+  state: GameState,
+  event: Extract<GameEvent, { type: 'showdown-shoot-expired' }>,
+): GameState {
+  if (state.status !== 'showdown' || !state.showdown) return state;
+  const losers = new Set(state.showdown.loserIds);
+  const players = state.players.map((player) => {
+    if (!losers.has(player.id)) return player;
+    const died = (event.rolls[player.id] ?? 1) < foldShootDeathProbability(player.betThisHand);
+    return died ? { ...player, alive: false } : player;
+  });
+  const survivors = players.filter((player) => player.alive);
+  if (survivors.length <= 1) {
+    return {
+      ...state,
+      players,
+      status: 'won',
+      currentActorId: null,
+      pendingFoldShoot: null,
+      showdown: null,
+      winnerId: survivors[0]?.id ?? null,
+    };
+  }
+  return dealNextHand(
+    { ...state, players, pendingFoldShoot: null, showdown: null, winnerId: null },
     event.nextDeck ?? defaultDeck,
   );
 }
 
 function advance(state: GameState): GameState {
   if (roundComplete(state)) {
-    if (state.stage === 'river') return { ...state, status: 'showdown', currentActorId: null };
+    if (state.stage === 'river') return enterShowdown(state);
     return nextStage(state);
   }
   return { ...state, currentActorId: nextActor(state) };
+}
+
+function enterShowdown(state: GameState): GameState {
+  const missingCommunity = Math.max(0, 5 - state.communityCards.length);
+  const revealed = {
+    ...state,
+    communityCards: [...state.communityCards, ...state.deck.slice(0, missingCommunity)],
+    deck: state.deck.slice(missingCommunity),
+  };
+  return {
+    ...revealed,
+    status: 'showdown',
+    currentActorId: null,
+    showdown: buildShowdown(revealed),
+  };
+}
+
+function buildShowdown(state: GameState): ShowdownState {
+  const ranked = activePlayers(state)
+    .map((player) => {
+      const result = evaluateBestHand([...player.holeCards, ...state.communityCards]);
+      return Result.isSuccess(result) ? { playerId: player.id, hand: result.success } : null;
+    })
+    .filter((entry): entry is Omit<ShowdownEntry, 'result'> => entry !== null);
+  const best = ranked.reduce<HandRank | null>(
+    (current, entry) => (!current || compareHands(entry.hand, current) > 0 ? entry.hand : current),
+    null,
+  );
+  const allTied = best ? ranked.every((entry) => compareHands(entry.hand, best) === 0) : true;
+  const entries = ranked.map((entry): ShowdownEntry => {
+    const isBest = best ? compareHands(entry.hand, best) === 0 : true;
+    return { ...entry, result: allTied ? 'tie' : isBest ? 'winner' : 'loser' };
+  });
+  return {
+    entries,
+    loserIds: entries.filter((entry) => entry.result === 'loser').map((entry) => entry.playerId),
+  };
 }
 
 function nextStage(state: GameState): GameState {
@@ -463,6 +568,7 @@ function dealNextHand(state: GameState, deck: Card[]): GameState {
     currentActorId: null,
     pendingAllIn: false,
     pendingFoldShoot: null,
+    showdown: null,
     winnerId: null,
   };
   return { ...reset, currentActorId: firstActor(reset) };

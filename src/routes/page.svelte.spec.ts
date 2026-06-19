@@ -50,6 +50,34 @@ describe('首页', () => {
     await expect.element(page.getByText('AI-3 在 翻牌前 选择 跟注')).toBeInTheDocument();
   });
 
+  it('河牌后显示摊牌亮牌，输者同时开枪后出现胜利屏', async () => {
+    vi.useFakeTimers();
+    // AI 全部跟注，摊牌输者 roll=0 → 5/8 水位下全部死亡。
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 4; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await vi.advanceTimersByTimeAsync(9000);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(6);
+    expect(page.getByTestId('showdown-winner').elements()).toHaveLength(1);
+    expect(page.getByTestId('showdown-loser').elements()).toHaveLength(3);
+    await expect.element(page.getByText('输者 2.5s 后同时开枪…')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('win-screen')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('showdown-shoot-result'))
+      .toHaveTextContent('输者开枪：AI-1死亡、AI-2死亡、AI-3死亡');
+    await expect.element(page.getByText('人类 是最后一名存活玩家。')).toBeInTheDocument();
+  });
+
   it('弃牌后阻塞行动轮并展示开枪揭示，存活则标记弃牌后继续', async () => {
     vi.useFakeTimers();
     // roll=0.999 → 1/8 水位下存活
@@ -84,9 +112,9 @@ describe('首页', () => {
 
     await vi.advanceTimersByTimeAsync(2500);
 
-    await expect.element(page.getByTestId('fold-shoot-result')).toHaveTextContent(
-      '人类开枪：死亡·本手作废',
-    );
+    await expect
+      .element(page.getByTestId('fold-shoot-result'))
+      .toHaveTextContent('人类开枪：死亡·本手作废');
     // 人类出局，其余 3 名存活玩家重开新一手 ante=1
     expect(page.getByText('出局').elements()).toHaveLength(1);
     expect(page.getByText('存活').elements()).toHaveLength(3);

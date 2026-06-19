@@ -11,6 +11,7 @@
     defaultDeck,
     engine,
     FOLD_SHOOT_DELAY_MS,
+    SHOWDOWN_SHOOT_DELAY_MS,
     initialState,
     randomThinkDelayMs,
     shuffleDeck,
@@ -24,6 +25,8 @@
   let game: GameState = $state(initialState);
   // 最近一次弃牌开枪结果，用于展示揭示过渡（存活退出标记 / 致死作废过渡）。
   let lastShoot = $state<{ playerId: PlayerId; died: boolean } | null>(null);
+  // 最近一次摊牌输者开枪结果，跨入下一手 / 胜利屏后仍展示一次。
+  let lastShowdownShoot = $state<{ loserIds: PlayerId[]; diedIds: PlayerId[] } | null>(null);
   const currentActor = $derived(game.players.find((player) => player.id === game.currentActorId));
   const currentActorName = $derived(currentActor?.name ?? '无');
   const currentStageName = $derived(game.stage ? stageText(game.stage) : '未开始');
@@ -36,12 +39,12 @@
   // 弃牌开枪阻塞期间展示的玩家（外置 2.5s 定时器由 UI 层持有）。
   const pendingShootPlayer = $derived(
     game.pendingFoldShoot
-      ? game.players.find((player) => player.id === game.pendingFoldShoot) ?? null
+      ? (game.players.find((player) => player.id === game.pendingFoldShoot) ?? null)
       : null,
   );
   const winner = $derived(
     game.status === 'won' && game.winnerId
-      ? game.players.find((player) => player.id === game.winnerId) ?? null
+      ? (game.players.find((player) => player.id === game.winnerId) ?? null)
       : null,
   );
   const lastShootLabel = $derived.by(() => {
@@ -51,6 +54,15 @@
     const outcome = shoot.died ? '死亡' : '存活';
     const suffix = shoot.died && game.status === 'playing' ? '·本手作废' : '';
     return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
+  });
+  const lastShowdownLabel = $derived.by(() => {
+    const shoot = lastShowdownShoot;
+    if (!shoot) return null;
+    if (shoot.loserIds.length === 0) return '全员平局，无人开枪';
+    const text = shoot.loserIds
+      .map((id) => `${playerName(id)}${shoot.diedIds.includes(id) ? '死亡' : '存活'}`)
+      .join('、');
+    return `输者开枪：${text}`;
   });
 
   $effect(() => {
@@ -88,8 +100,38 @@
     return () => clearTimeout(timeout);
   });
 
+  // 摊牌输者同时开枪：一次事件带入所有输者 roll，避免逐个结算影响胜利判定。
+  $effect(() => {
+    const showdown = game.showdown;
+    if (game.status !== 'showdown' || !showdown) return;
+    const settleShowdown = () => {
+      const rolls = Object.fromEntries(showdown.loserIds.map((id) => [id, Math.random()]));
+      const beforeAlive = new Set(
+        game.players.filter((player) => player.alive).map((player) => player.id),
+      );
+      const next = engine(game, {
+        type: 'showdown-shoot-expired',
+        rolls,
+        nextDeck: shuffleDeck(defaultDeck),
+      }).state;
+      const diedIds = showdown.loserIds.filter(
+        (id) => beforeAlive.has(id) && !next.players.find((player) => player.id === id)?.alive,
+      );
+      game = next;
+      lastShowdownShoot = { loserIds: showdown.loserIds, diedIds };
+    };
+    if (showdown.loserIds.length === 0) {
+      settleShowdown();
+      return;
+    }
+    const timeout = setTimeout(settleShowdown, SHOWDOWN_SHOOT_DELAY_MS);
+    return () => clearTimeout(timeout);
+  });
+
   function startGame() {
     game = engine(game, { type: 'start-game' }).state;
+    lastShoot = null;
+    lastShowdownShoot = null;
   }
 
   function act(decision: Decision) {
@@ -107,6 +149,34 @@
 
   function stageText(stage: NonNullable<GameState['stage']>) {
     return { preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌' }[stage];
+  }
+
+  function handText(category: string) {
+    return (
+      (
+        {
+          'high-card': '高牌',
+          'one-pair': '一对',
+          'two-pair': '两对',
+          'three-kind': '三条',
+          straight: '顺子',
+          flush: '同花',
+          'full-house': '葫芦',
+          'four-kind': '四条',
+          'straight-flush': '同花顺',
+        } as Record<string, string>
+      )[category] ?? category
+    );
+  }
+
+  function showdownResultText(result: 'winner' | 'loser' | 'tie') {
+    return result === 'winner' ? '赢家' : result === 'loser' ? '输者' : '平局';
+  }
+
+  function shouldRevealHoleCards(player: GameState['players'][number]) {
+    if (player.isHuman) return true;
+    if (player.folded) return false;
+    return game.status === 'showdown' || !player.alive;
   }
 
   function playerName(playerId: PlayerId) {
@@ -142,6 +212,12 @@
           <p class="text-muted-foreground">
             {winner?.name ?? '无人'} 是最后一名存活玩家。
           </p>
+          {#if lastShowdownLabel}
+            <Badge variant="destructive" data-testid="showdown-shoot-result">
+              {lastShowdownLabel}
+            </Badge>
+          {/if}
+          <Button disabled>重新开始（切片 6）</Button>
         </CardContent>
       </Card>
     {:else}
@@ -162,7 +238,38 @@
             {lastShootLabel.text}
           </Badge>
         {/if}
+        {#if lastShowdownLabel}
+          <Badge variant="destructive" data-testid="showdown-shoot-result">
+            {lastShowdownLabel}
+          </Badge>
+        {/if}
       </div>
+
+      {#if game.status === 'showdown' && game.showdown}
+        <Card data-testid="showdown-panel">
+          <CardHeader><CardTitle>摊牌</CardTitle></CardHeader>
+          <CardContent class="space-y-3">
+            <p class="text-muted-foreground">所有公共牌已翻到河牌，存活未弃牌玩家亮牌比大小。</p>
+            <div class="flex flex-wrap gap-2">
+              {#each game.showdown.entries as entry (entry.playerId)}
+                <Badge
+                  variant={entry.result === 'loser' ? 'destructive' : 'secondary'}
+                  data-testid={`showdown-${entry.result}`}
+                >
+                  {playerName(entry.playerId)}：{handText(entry.hand.category)} · {showdownResultText(
+                    entry.result,
+                  )}
+                </Badge>
+              {/each}
+            </div>
+            {#if game.showdown.loserIds.length === 0}
+              <Badge variant="outline" data-testid="showdown-tie">全员平局，无人开枪</Badge>
+            {:else}
+              <Badge variant="destructive">输者 2.5s 后同时开枪…</Badge>
+            {/if}
+          </CardContent>
+        </Card>
+      {/if}
 
       <Card>
         <CardHeader><CardTitle>公共牌</CardTitle></CardHeader>
@@ -206,7 +313,9 @@
                 <Badge variant={player.alive ? 'outline' : 'destructive'}
                   >{player.alive ? '存活' : '出局'}</Badge
                 >
-                {#if player.folded}<Badge variant="destructive" data-testid="folded-badge">弃牌</Badge>{/if}
+                {#if player.folded}<Badge variant="destructive" data-testid="folded-badge"
+                    >弃牌</Badge
+                  >{/if}
                 {#if player.allIn}<Badge>全押</Badge>{/if}
                 {#if player.id === game.currentActorId}<Badge>行动中</Badge>{/if}
               </div>
@@ -214,11 +323,11 @@
             <CardContent class="space-y-3">
               <p>本手下注：{player.betThisHand} 颗子弹</p>
               <div class="flex gap-2" aria-label={`${player.name}底牌`}>
-                {#if player.isHuman}
+                {#if shouldRevealHoleCards(player)}
                   {#each player.holeCards as card (card.rank + card.suit)}
                     <span
                       class="bg-background rounded-lg border px-3 py-2 font-mono"
-                      data-testid="human-hole-card"
+                      data-testid={player.isHuman ? 'human-hole-card' : 'ai-hole-card-revealed'}
                     >
                       {cardText(card)}
                     </span>
