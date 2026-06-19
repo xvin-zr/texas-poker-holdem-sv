@@ -177,7 +177,7 @@
       });
   });
 
-  // All-in 等待的人类 7s 硬超时；AI 不走这个超时。
+  // All-in 等待的人类 10s 硬超时；AI 不走这个超时。
   $effect(() => {
     const wait = game.allInWait;
     const pending = isAllInResponderPending('human');

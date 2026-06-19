@@ -81,7 +81,7 @@ describe('首页', () => {
     await flushTimers();
 
     await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
-    await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时');
+    await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时：10s');
     // 人类作为响应者时，全押/弃牌操作在 alert-dialog 中展示
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-response-all-in')).toBeEnabled();
@@ -89,7 +89,7 @@ describe('首页', () => {
     await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
-    await vi.advanceTimersByTimeAsync(7000);
+    await vi.advanceTimersByTimeAsync(10000);
     await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();

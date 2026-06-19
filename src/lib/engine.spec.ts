@@ -2,6 +2,7 @@ import * as Result from 'effect/Result';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  ALL_IN_HUMAN_TIMEOUT_MS,
   compareHands,
   createDecisionInput,
   decideForAi,
@@ -305,6 +306,7 @@ describe('引擎 reducer', () => {
   });
 
   it('全押等待的人类超时会自动弃牌，AI 超时事件被忽略', () => {
+    expect(ALL_IN_HUMAN_TIMEOUT_MS).toBe(10000);
     const started = engine(initialState, { type: 'start-game' }).state;
     const afterHumanCall = act(started, 'human');
     const waiting = engine(afterHumanCall, {

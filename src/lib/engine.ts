@@ -19,7 +19,7 @@ export type EngineError = 'missing-decision-input' | 'invalid-card-count';
 // 弃牌开枪外置定时器：引擎发 effect 让 UI 层 2.5s 后回灌 fold-shoot-expired 事件。
 export const FOLD_SHOOT_DELAY_MS = 2500;
 export const SHOWDOWN_SHOOT_DELAY_MS = 2500;
-export const ALL_IN_HUMAN_TIMEOUT_MS = 7000;
+export const ALL_IN_HUMAN_TIMEOUT_MS = 10000;
 export const ALL_IN_SETTLEMENT_CHOICE_DELAY_MS = 0;
 export const ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS = 2500;
 export const ALL_IN_SETTLEMENT_REVEAL_DELAY_MS = 1000;
