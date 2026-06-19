@@ -78,6 +78,8 @@ describe('首页', () => {
 
     await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时');
+    // 人类作为响应者时，全押/弃牌操作在 alert-dialog 中展示
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-response-all-in')).toBeEnabled();
     await expect.element(page.getByTestId('all-in-response-fold')).toBeEnabled();
     await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
@@ -108,9 +110,13 @@ describe('首页', () => {
 
     await vi.advanceTimersByTimeAsync(2500);
 
+    // t=6 结算后暂停在 hand-resolved，未自动进下一手
+    await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
     expect(page.getByText('存活').elements()).toHaveLength(4);
-    await expect.element(page.getByTestId('all-in-shoot-result')).not.toBeInTheDocument();
   });
 
   it('人类全押后只让 AI 并行响应，不显示人类倒计时', async () => {
@@ -165,7 +171,7 @@ describe('首页', () => {
     expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
   });
 
-  it('All-in t=6 有死亡但仍 ≥2 存活会进下一手并清掉结果徽章', async () => {
+  it('All-in t=6 有死亡但仍 ≥2 存活会暂停并清掉结果徽章', async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
     render(Page);
@@ -184,11 +190,36 @@ describe('首页', () => {
     random.mockReturnValue(0);
     await vi.advanceTimersByTimeAsync(2500);
 
+    // 结算后暂停在 hand-resolved，徽章仍在展示
+    await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-shoot-result')).toBeInTheDocument();
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
     expect(page.getByText('出局').elements()).toHaveLength(1);
     expect(page.getByText('存活').elements()).toHaveLength(3);
     await expect.element(page.getByTestId('all-in-shoot-result')).not.toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-fold-shoot-result')).not.toBeInTheDocument();
+  });
+
+  it('人类在 alert-dialog 点弃牌响应全押', async () => {
+    vi.useFakeTimers();
+    // 人类跟注后 AI-1 全押，人类作为响应者在弹窗点弃牌。
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await page.getByTestId('all-in-response-fold').click();
+
+    // 人类已弃牌，弹窗关闭，进入结算时间轴
+    await expect.element(page.getByRole('alertdialog')).not.toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect.element(page.getByText('人类：弃牌')).toBeInTheDocument();
   });
 
   it('All-in 弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
@@ -267,7 +298,7 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：AI-1')).toBeInTheDocument();
   });
 
-  it('弃牌开枪致死则标记出局并作废本手，进入下一手', async () => {
+  it('弃牌开枪致死则标记出局并作废本手，暂停等待开始下一手', async () => {
     vi.useFakeTimers();
     // roll=0 → 1/8 水位下致死
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -278,12 +309,98 @@ describe('首页', () => {
 
     await vi.advanceTimersByTimeAsync(2500);
 
-    await expect
-      .element(page.getByTestId('fold-shoot-result'))
-      .toHaveTextContent('人类开枪：死亡·本手作废');
-    // 人类出局，其余 3 名存活玩家重开新一手 ante=1
+    await expect.element(page.getByTestId('fold-shoot-result')).toHaveTextContent('人类开枪：死亡');
+    // 人类出局，暂停在 hand-resolved，行动按钮不可用
     expect(page.getByText('出局').elements()).toHaveLength(1);
-    expect(page.getByText('存活').elements()).toHaveLength(3);
+    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeInTheDocument();
+    await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+
+    // 进下一手 preflop，其余 3 名存活玩家重开 ante=1
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('存活').elements()).toHaveLength(3);
+  });
+
+  it('摊牌后有存活者会暂停等待开始下一手', async () => {
+    vi.useFakeTimers();
+    // AI 全部跟注到摊牌，人类赢；输者开枪 roll=0.7 ≥ 5/8 全部存活 → ≥2 存活暂停。
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 4; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await vi.advanceTimersByTimeAsync(9000);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+
+    // 切换随机源使摊牌开枪掷骰全部存活
+    random.mockReturnValue(0.7);
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('hand-resolution-showdown')).toBeInTheDocument();
+    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeEnabled();
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('胜利屏显示赢家信息并暂停，点击开始重置开新一局', async () => {
+    vi.useFakeTimers();
+    // AI 全部跟注，摊牌输者 roll=0 → 全部死亡。
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 4; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await vi.advanceTimersByTimeAsync(9000);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('win-screen')).toBeInTheDocument();
+    await expect.element(page.getByText('人类 是最后一名存活玩家。')).toBeInTheDocument();
+
+    await page.getByRole('button', { name: '开始' }).click();
+
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
+    expect(page.getByText('本手下注：1 颗子弹').elements()).toHaveLength(4);
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+    expect(page.getByTestId('human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('ai-hole-card-hidden').elements()).toHaveLength(6);
+  });
+
+  it('开始游戏会洗牌，人类底牌不恒为 A♠ A♥', async () => {
+    // 不 mock Math.random：bug 下 start-game 未传洗过的牌组，人类底牌恒为 A♠ A♥。
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+
+    const humanCards = page
+      .getByTestId('human-hole-card')
+      .elements()
+      .map((card) => card.textContent);
+    expect(humanCards).toHaveLength(2);
+    expect(humanCards).not.toEqual(['A♠', 'A♥']);
+  });
+
+  it('AI 性格标识不对玩家展示', async () => {
+    // 性格仍影响 AI 决策（内部不变），仅 UI 不展示。
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+
+    expect(page.getByTestId('ai-personality').elements()).toHaveLength(0);
   });
 });

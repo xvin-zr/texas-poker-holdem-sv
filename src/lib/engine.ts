@@ -3,6 +3,7 @@ import * as Result from 'effect/Result';
 
 export type Stage = 'preflop' | 'flop' | 'turn' | 'river';
 export type PlayerId = 'human' | 'ai-1' | 'ai-2' | 'ai-3';
+export type AiPlayerId = Exclude<PlayerId, 'human'>;
 export type Rank = 'A' | 'K' | 'Q' | 'J' | '10' | '9' | '8' | '7' | '6' | '5' | '4' | '3' | '2';
 export type Suit = '♠' | '♥' | '♦' | '♣';
 export type Personality = 'conservative' | 'balanced' | 'aggressive';
@@ -122,7 +123,19 @@ export type Player = PublicPlayer & {
   holeCards: [Card, Card];
 };
 
-export type GameStatus = 'idle' | 'playing' | 'all-in-settle' | 'showdown' | 'won';
+export type GameStatus =
+  | 'idle'
+  | 'playing'
+  | 'all-in-settle'
+  | 'showdown'
+  | 'hand-resolved'
+  | 'won';
+
+// 手结束且 ≥2 存活时的结算暂停判别器；UI 据此展示「本手结算」与「开始下一手」按钮。
+export type HandResolution =
+  | { kind: 'showdown'; diedIds: PlayerId[] }
+  | { kind: 'all-in'; diedIds: PlayerId[] }
+  | { kind: 'void'; voidPlayerId: PlayerId };
 
 export type GameState = {
   status: GameStatus;
@@ -139,11 +152,15 @@ export type GameState = {
   // 弃牌开枪阻塞期间记录待开枪玩家，行动轮暂停直到 fold-shoot-expired 回灌。
   pendingFoldShoot: PlayerId | null;
   showdown: ShowdownState | null;
+  // hand-resolved 状态下保留上一手结算的判别器；won 状态透传最后一手结果给胜利屏。
+  handResolution: HandResolution | null;
   winnerId: PlayerId | null;
+  // 第一局随机分配、跨局固定保留的 AI 性格（人类无性格）。
+  aiPersonalities: Record<AiPlayerId, Personality> | null;
 };
 
 export type GameEvent =
-  | { type: 'start-game'; deck?: Card[] }
+  | { type: 'start-game'; deck?: Card[]; personalities?: Record<AiPlayerId, Personality> }
   | { type: 'player-action'; playerId: PlayerId; decision: Decision }
   | { type: 'ai-think-expired'; playerId: PlayerId; decision: Decision }
   | { type: 'all-in-timeout'; playerId: PlayerId }
@@ -157,19 +174,17 @@ export type GameEvent =
   | {
       type: 'all-in-settlement-showdown-expired';
       rolls: Partial<Record<PlayerId, number>>;
-      nextDeck?: Card[];
     }
   | {
       type: 'fold-shoot-expired';
       playerId: PlayerId;
       roll: number;
-      nextDeck?: Card[];
     }
   | {
       type: 'showdown-shoot-expired';
       rolls: Partial<Record<PlayerId, number>>;
-      nextDeck?: Card[];
-    };
+    }
+  | { type: 'next-hand'; deck: Card[] };
 
 export type FoldShootExpired = Extract<GameEvent, { type: 'fold-shoot-expired' }>;
 export type AllInSettlementEvent = Extract<
@@ -202,7 +217,9 @@ export const initialState: GameState = {
   allInSettlement: null,
   pendingFoldShoot: null,
   showdown: null,
+  handResolution: null,
   winnerId: null,
+  aiPersonalities: null,
 };
 
 // 弃牌开枪死亡概率 = betThisHand ÷ 8，≥8 封顶 95%。roll 由外层注入保持 reducer 纯净。
@@ -210,7 +227,7 @@ export function foldShootDeathProbability(betThisHand: number): number {
   return betThisHand >= 8 ? FOLD_SHOOT_CAP_PROBABILITY : betThisHand / 8;
 }
 
-export function shuffleDeck(deck: Card[], random = Math.random): Card[] {
+export function shuffleDeck<T>(deck: readonly T[], random = Math.random): T[] {
   const next = [...deck];
   for (let index = next.length - 1; index > 0; index -= 1) {
     const swap = Math.floor(random() * (index + 1));
@@ -221,10 +238,10 @@ export function shuffleDeck(deck: Card[], random = Math.random): Card[] {
 
 const seats = [
   { id: 'human', name: '人类', isHuman: true },
-  { id: 'ai-1', name: 'AI-1', isHuman: false, personality: 'conservative' },
-  { id: 'ai-2', name: 'AI-2', isHuman: false, personality: 'balanced' },
-  { id: 'ai-3', name: 'AI-3', isHuman: false, personality: 'aggressive' },
-] as const satisfies readonly Pick<PublicPlayer, 'id' | 'name' | 'isHuman' | 'personality'>[];
+  { id: 'ai-1', name: 'AI-1', isHuman: false },
+  { id: 'ai-2', name: 'AI-2', isHuman: false },
+  { id: 'ai-3', name: 'AI-3', isHuman: false },
+] as const satisfies readonly Pick<PublicPlayer, 'id' | 'name' | 'isHuman'>[];
 
 const seatOrder = seats.map((seat) => seat.id);
 
@@ -301,7 +318,7 @@ export async function decideForAi(
   playerId: PlayerId,
 ): Promise<Result.Result<Decision, EngineError>> {
   const input = createDecisionInput(state, playerId);
-  if (Result.isFailure(input)) return Result.fail(input.failure);
+  if (Result.isFailure(input)) return Result.succeed({ action: 'fold' });
 
   try {
     return Result.succeed(await decider.decide(input.success));
@@ -312,7 +329,15 @@ export async function decideForAi(
 
 export function createWeightedAiDecider(personality: Personality, random = Math.random): AiDecider {
   return {
-    decide: (input) => Promise.resolve(weightedAiDecision(personality, input.stage, random)),
+    decide: (input) =>
+      Promise.resolve(
+        weightedAiDecision(
+          personality,
+          input.stage,
+          random,
+          input.pendingAllIn ? ['all-in', 'fold'] : undefined,
+        ),
+      ),
   };
 }
 
@@ -368,8 +393,8 @@ export function evaluateBestHand(cards: Card[]): Result.Result<HandRank, EngineE
 export function engine(state: GameState, event: GameEvent): EngineResult {
   return Match.value(event).pipe(
     Match.when({ type: 'timer-expired' }, () => ({ state, effects: [] })),
-    Match.when({ type: 'start-game' }, ({ deck }) => ({
-      state: startGame(deck ?? defaultDeck),
+    Match.when({ type: 'start-game' }, (startEvent) => ({
+      state: startGame(startEvent.deck ?? defaultDeck, state, startEvent.personalities),
       effects: [],
     })),
     Match.whenOr(
@@ -384,6 +409,10 @@ export function engine(state: GameState, event: GameEvent): EngineResult {
     ),
     Match.when({ type: 'showdown-shoot-expired' }, (shootEvent) => ({
       state: applyShowdownShoot(state, shootEvent),
+      effects: [],
+    })),
+    Match.when({ type: 'next-hand' }, (nextHandEvent) => ({
+      state: applyNextHand(state, nextHandEvent.deck),
       effects: [],
     })),
     Match.orElse((playingEvent) => applyPlayingEvent(state, playingEvent)),
@@ -416,12 +445,26 @@ function applyAllInWaitEvent(state: GameState, event: GameEvent): EngineResult {
   );
 }
 
-function startGame(deck: Card[]): GameState {
+function assignRandomPersonalities(random = Math.random): Record<AiPlayerId, Personality> {
+  const pool: Personality[] = ['conservative', 'balanced', 'aggressive'];
+  const shuffled = shuffleDeck(pool, random);
+  return { 'ai-1': shuffled[0]!, 'ai-2': shuffled[1]!, 'ai-3': shuffled[2]! };
+}
+
+function startGame(
+  deck: Card[],
+  state: GameState,
+  eventPersonalities?: Record<AiPlayerId, Personality>,
+): GameState {
+  // 性格一旦在第一局分配就跨局固定，后续 start-game 不再接受覆盖。
+  const personalities = state.aiPersonalities ?? eventPersonalities ?? assignRandomPersonalities();
   const base: GameState = {
     ...initialState,
     status: 'playing',
+    aiPersonalities: personalities,
     players: seats.map((seat) => ({
       ...seat,
+      personality: seat.isHuman ? undefined : personalities[seat.id as AiPlayerId],
       alive: true,
       folded: false,
       allIn: false,
@@ -599,14 +642,19 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
       winnerId: survivors[0]?.id ?? null,
       currentActorId: null,
       pendingFoldShoot: null,
+      handResolution: { kind: 'void', voidPlayerId: event.playerId },
     };
   }
 
-  // 致死且 ≥2 存活：本手作废，洗牌进下一手（死者不参与，其他人下注不退还）。
-  return dealNextHand(
-    { ...state, players, pendingFoldShoot: null, showdown: null, winnerId: null },
-    event.nextDeck ?? defaultDeck,
-  );
+  // 致死且 ≥2 存活：本手作废，暂停进入 hand-resolved，等待玩家点「开始下一手」再洗牌。
+  return {
+    ...state,
+    players,
+    status: 'hand-resolved',
+    currentActorId: null,
+    pendingFoldShoot: null,
+    handResolution: { kind: 'void', voidPlayerId: event.playerId },
+  };
 }
 
 function applyAllInSettlementEvent(state: GameState, event: AllInSettlementEvent): GameState {
@@ -617,8 +665,8 @@ function applyAllInSettlementEvent(state: GameState, event: AllInSettlementEvent
       shootAllInFolders(state, rolls),
     ),
     Match.when({ type: 'all-in-settlement-reveal-expired' }, () => revealAllInCards(state)),
-    Match.when({ type: 'all-in-settlement-showdown-expired' }, ({ rolls, nextDeck }) =>
-      shootAllInLosers(state, rolls, nextDeck ?? defaultDeck),
+    Match.when({ type: 'all-in-settlement-showdown-expired' }, ({ rolls }) =>
+      shootAllInLosers(state, rolls),
     ),
     Match.exhaustive,
   );
@@ -671,31 +719,41 @@ function revealAllInCards(state: GameState): GameState {
   };
 }
 
-function shootAllInLosers(
-  state: GameState,
-  rolls: Partial<Record<PlayerId, number>>,
-  nextDeck: Card[],
-): GameState {
+function shootAllInLosers(state: GameState, rolls: Partial<Record<PlayerId, number>>): GameState {
   const settlement = state.allInSettlement;
   if (!settlement || settlement.step !== 'reveal') return state;
-  const won = winIfOnlyOneAlive(state);
+  // 预置判别器，让提前胜利路径也能透传 handResolution 到胜利屏。
+  const seeded: GameState = {
+    ...state,
+    handResolution: { kind: 'all-in', diedIds: [] },
+  };
+  const won = winIfOnlyOneAlive(seeded);
   if (won) return won;
 
-  const showdown = settlement.showdown ?? buildAllInShowdown(state, settlement.allInPlayerIds);
+  const showdown = settlement.showdown ?? buildAllInShowdown(seeded, settlement.allInPlayerIds);
   const losers = new Set(showdown.loserIds);
-  const players = state.players.map((player) => {
+  const players = seeded.players.map((player) => {
     if (!losers.has(player.id)) return player;
     const died = (rolls[player.id] ?? 1) < foldShootDeathProbability(player.betThisHand);
     return died ? { ...player, alive: false } : player;
   });
+  const diedIds = showdown.loserIds.filter(
+    (id) => !players.find((player) => player.id === id)!.alive,
+  );
   const settled: GameState = {
-    ...state,
+    ...seeded,
     players,
     allInSettlement: { ...settlement, showdown },
+    handResolution: { kind: 'all-in', diedIds },
   };
   const final = winIfOnlyOneAlive(settled);
   if (final) return final;
-  return dealNextHand({ ...settled, allInSettlement: null, showdown: null }, nextDeck);
+  // 暂停进入 hand-resolved，保留 allInSettlement/showdown 供 UI 展示。
+  return {
+    ...settled,
+    status: 'hand-resolved',
+    currentActorId: null,
+  };
 }
 
 function winIfOnlyOneAlive(state: GameState): GameState | null {
@@ -707,9 +765,8 @@ function winIfOnlyOneAlive(state: GameState): GameState | null {
     currentActorId: null,
     pendingAllIn: false,
     allInWait: null,
-    allInSettlement: null,
     pendingFoldShoot: null,
-    showdown: null,
+    // 保留 allInSettlement/showdown/handResolution 供胜利屏展示最后一手结果。
     winnerId: survivors[0]?.id ?? null,
   };
 }
@@ -742,6 +799,10 @@ function applyShowdownShoot(
     return died ? { ...player, alive: false } : player;
   });
   const survivors = players.filter((player) => player.alive);
+  const diedIds = state.showdown.loserIds.filter(
+    (id) => !players.find((player) => player.id === id)!.alive,
+  );
+  const resolution: HandResolution = { kind: 'showdown', diedIds };
   if (survivors.length <= 1) {
     return {
       ...state,
@@ -749,14 +810,19 @@ function applyShowdownShoot(
       status: 'won',
       currentActorId: null,
       pendingFoldShoot: null,
-      showdown: null,
+      handResolution: resolution,
       winnerId: survivors[0]?.id ?? null,
     };
   }
-  return dealNextHand(
-    { ...state, players, pendingFoldShoot: null, showdown: null, winnerId: null },
-    event.nextDeck ?? defaultDeck,
-  );
+  // 暂停进入 hand-resolved，保留 showdown 供 UI 展示，等待玩家点「开始下一手」。
+  return {
+    ...state,
+    players,
+    status: 'hand-resolved',
+    currentActorId: null,
+    pendingFoldShoot: null,
+    handResolution: resolution,
+  };
 }
 
 function advance(state: GameState): GameState {
@@ -862,6 +928,22 @@ function nextActor(state: GameState) {
 
 function activePlayers(state: GameState) {
   return state.players.filter((player) => player.alive && !player.folded);
+}
+
+// 玩家在 hand-resolved 状态点「开始下一手」：清空上一手结算数据，发新一手。
+function applyNextHand(state: GameState, deck: Card[]): GameState {
+  if (state.status !== 'hand-resolved') return state;
+  return dealNextHand(
+    {
+      ...state,
+      pendingFoldShoot: null,
+      showdown: null,
+      allInSettlement: null,
+      handResolution: null,
+      winnerId: null,
+    },
+    deck,
+  );
 }
 
 // 发新一手：仅存活玩家参与，每人 Ante 1 颗，重新发底牌。死者保留 alive=false 不参与。

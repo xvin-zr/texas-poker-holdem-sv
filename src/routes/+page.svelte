@@ -1,6 +1,14 @@
 <svelte:options runes={true} />
 
 <script lang="ts">
+  import AlertDialogAction from '$lib/components/ui/alert-dialog/alert-dialog-action.svelte';
+  import AlertDialogCancel from '$lib/components/ui/alert-dialog/alert-dialog-cancel.svelte';
+  import AlertDialogContent from '$lib/components/ui/alert-dialog/alert-dialog-content.svelte';
+  import AlertDialogDescription from '$lib/components/ui/alert-dialog/alert-dialog-description.svelte';
+  import AlertDialogFooter from '$lib/components/ui/alert-dialog/alert-dialog-footer.svelte';
+  import AlertDialogHeader from '$lib/components/ui/alert-dialog/alert-dialog-header.svelte';
+  import AlertDialogTitle from '$lib/components/ui/alert-dialog/alert-dialog-title.svelte';
+  import AlertDialog from '$lib/components/ui/alert-dialog/alert-dialog.svelte';
   import Badge from '$lib/components/ui/badge/badge.svelte';
   import Button from '$lib/components/ui/button/button.svelte';
   import CardContent from '$lib/components/ui/card/card-content.svelte';
@@ -13,6 +21,8 @@
     ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS,
     ALL_IN_SETTLEMENT_REVEAL_DELAY_MS,
     ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS,
+    createWeightedAiDecider,
+    decideForAi,
     defaultDeck,
     engine,
     FOLD_SHOOT_DELAY_MS,
@@ -20,7 +30,6 @@
     initialState,
     randomThinkDelayMs,
     shuffleDeck,
-    weightedAiDecision,
     type Card as PlayingCard,
     type Decision,
     type GameState,
@@ -28,6 +37,7 @@
     type ShootResult,
   } from '$lib/engine';
   import * as Match from 'effect/Match';
+  import * as Result from 'effect/Result';
   import { onDestroy } from 'svelte';
 
   let game: GameState = $state(initialState);
@@ -42,7 +52,7 @@
   let humanAllInTimeout: ReturnType<typeof setTimeout> | null = null;
   let humanAllInInterval: ReturnType<typeof setInterval> | null = null;
   let activeAllInAiTimerId: string | null = null;
-  let allInAiTimeouts: ReturnType<typeof setTimeout>[] = [];
+  let allInAiTimeouts: { timeout: ReturnType<typeof setTimeout>; cancel: () => void }[] = [];
   let activeAllInSettlementTimerKey: string | null = null;
   let allInSettlementTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -80,7 +90,7 @@
     if (!shoot) return null;
     const name = game.players.find((player) => player.id === shoot.playerId)?.name ?? '';
     const outcome = shoot.died ? '死亡' : '存活';
-    const suffix = shoot.died && game.status === 'playing' ? '·本手作废' : '';
+    const suffix = shoot.died && game.status !== 'won' ? '·本手作废' : '';
     return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
   });
   const lastShowdownLabel = $derived.by(() => {
@@ -113,15 +123,22 @@
     if (!thinkingPlayerId || !currentActor || currentActor.isHuman) return;
     const actorId = currentActor.id;
     const personality = currentActor.personality ?? 'balanced';
-    const stage = game.stage ?? 'preflop';
-    const timeout = setTimeout(() => {
-      game = engine(game, {
-        type: 'ai-think-expired',
-        playerId: actorId,
-        decision: weightedAiDecision(personality, stage, Math.random),
-      }).state;
+    const decider = createWeightedAiDecider(personality);
+    let cancelled = false;
+    const timeout = setTimeout(async () => {
+      const decision = await decideForAi(decider, game, actorId);
+      if (!cancelled && Result.isSuccess(decision)) {
+        game = engine(game, {
+          type: 'ai-think-expired',
+          playerId: actorId,
+          decision: decision.success,
+        }).state;
+      }
     }, randomThinkDelayMs());
-    return () => clearTimeout(timeout);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
   });
 
   // All-in 等待里的 AI 并行计时；每个待响应 AI 从同一等待开始点独立思考。
@@ -135,19 +152,29 @@
     if (activeAllInAiTimerId === wait.timerId) return;
     clearAllInAiTimers();
     activeAllInAiTimerId = wait.timerId;
-    const stage = game.stage ?? 'preflop';
     allInAiTimeouts = wait.responderIds
       .filter((playerId) => !game.players.find((player) => player.id === playerId)?.isHuman)
       .map((playerId) => {
         const player = game.players.find((candidate) => candidate.id === playerId);
         const personality = player?.personality ?? 'balanced';
-        return setTimeout(() => {
-          game = engine(game, {
-            type: 'ai-think-expired',
-            playerId,
-            decision: weightedAiDecision(personality, stage, Math.random, ['all-in', 'fold']),
-          }).state;
+        const decider = createWeightedAiDecider(personality);
+        let cancelled = false;
+        const timeout = setTimeout(async () => {
+          const decision = await decideForAi(decider, game, playerId);
+          if (!cancelled && Result.isSuccess(decision)) {
+            game = engine(game, {
+              type: 'ai-think-expired',
+              playerId,
+              decision: decision.success,
+            }).state;
+          }
         }, randomThinkDelayMs());
+        return {
+          timeout,
+          cancel: () => {
+            cancelled = true;
+          },
+        };
       });
   });
 
@@ -176,7 +203,7 @@
     }, ALL_IN_HUMAN_TIMEOUT_MS);
   });
 
-  // 弃牌开枪定时器外置：pendingFoldShoot 置位后 2.5s 回灌到期事件，roll 与洗牌由 UI 注入。
+  // 弃牌开枪定时器外置：pendingFoldShoot 置位后 2.5s 回灌到期事件，roll 由 UI 注入。
   $effect(() => {
     const pending = game.pendingFoldShoot;
     if (!pending) return;
@@ -187,7 +214,6 @@
         type: 'fold-shoot-expired',
         playerId: pending,
         roll,
-        nextDeck: shuffleDeck(defaultDeck),
       }).state;
       const after = next.players.find((player) => player.id === pending)?.alive ?? false;
       game = next;
@@ -208,7 +234,6 @@
       const next = engine(game, {
         type: 'showdown-shoot-expired',
         rolls,
-        nextDeck: shuffleDeck(defaultDeck),
       }).state;
       const diedIds = showdown.loserIds.filter(
         (id) => beforeAlive.has(id) && !next.players.find((player) => player.id === id)?.alive,
@@ -283,7 +308,6 @@
           const next = engine(game, {
             type: 'all-in-settlement-showdown-expired',
             rolls,
-            nextDeck: shuffleDeck(defaultDeck),
           }).state;
           const diedIds = loserIds.filter(
             (id) => beforeAlive.has(id) && !next.players.find((player) => player.id === id)?.alive,
@@ -309,11 +333,21 @@
     activeHumanAllInTimerId = null;
     activeAllInAiTimerId = null;
     activeAllInSettlementTimerKey = null;
-    game = engine(game, { type: 'start-game' }).state;
+    game = engine(game, { type: 'start-game', deck: shuffleDeck(defaultDeck) }).state;
     lastShoot = null;
     lastShowdownShoot = null;
     lastAllInFoldShoot = null;
     lastAllInShoot = null;
+  }
+
+  function startNextHand() {
+    if (game.status !== 'hand-resolved') return;
+    // 进入下一手时清除上一手结算揭示标记。
+    lastShoot = null;
+    lastShowdownShoot = null;
+    lastAllInFoldShoot = null;
+    lastAllInShoot = null;
+    game = engine(game, { type: 'next-hand', deck: shuffleDeck(defaultDeck) }).state;
   }
 
   function act(decision: Decision) {
@@ -334,7 +368,10 @@
   }
 
   function clearAllInAiTimers() {
-    for (const timeout of allInAiTimeouts) clearTimeout(timeout);
+    for (const { timeout, cancel } of allInAiTimeouts) {
+      cancel();
+      clearTimeout(timeout);
+    }
     allInAiTimeouts = [];
   }
 
@@ -417,13 +454,13 @@
     if (player.isHuman) return true;
     if (player.folded) return false;
     if (
-      game.status === 'all-in-settle' &&
+      (game.status === 'all-in-settle' || game.status === 'hand-resolved') &&
       allInSettlement?.step === 'reveal' &&
       allInSettlement.allInPlayerIds.includes(player.id) &&
       player.alive
     )
       return true;
-    return game.status === 'showdown' || !player.alive;
+    return game.status === 'showdown' || game.status === 'hand-resolved' || !player.alive;
   }
 
   function playerName(playerId: PlayerId) {
@@ -474,7 +511,7 @@
               {lastAllInShootLabel}
             </Badge>
           {/if}
-          <Button disabled>重新开始（切片 6）</Button>
+          <Button size="lg" onclick={startGame}>开始</Button>
         </CardContent>
       </Card>
     {:else}
@@ -520,6 +557,28 @@
         {/if}
       </div>
 
+      {#if game.status === 'hand-resolved'}
+        <Card data-testid="hand-resolved-panel">
+          <CardHeader><CardTitle>本手结算</CardTitle></CardHeader>
+          <CardContent class="space-y-3">
+            {#if game.handResolution?.kind === 'void'}
+              <Badge variant="destructive" data-testid="hand-resolution-void">
+                {playerName(game.handResolution.voidPlayerId)} 死亡，本手作废
+              </Badge>
+            {:else if game.handResolution?.kind === 'all-in'}
+              <Badge variant="secondary" data-testid="hand-resolution-all-in">全押结算完成</Badge>
+            {:else}
+              <Badge variant="secondary" data-testid="hand-resolution-showdown">摊牌结算完成</Badge>
+            {/if}
+            <div>
+              <Button size="lg" data-testid="next-hand-button" onclick={startNextHand}
+                >开始下一手</Button
+              >
+            </div>
+          </CardContent>
+        </Card>
+      {/if}
+
       {#if allInWait}
         <Card data-testid="all-in-wait-panel">
           <CardHeader><CardTitle>全押等待</CardTitle></CardHeader>
@@ -531,17 +590,6 @@
               <Badge variant="destructive" data-testid="all-in-countdown">
                 人类倒计时：{allInHumanRemaining}s
               </Badge>
-              <div class="flex gap-2">
-                <Button
-                  data-testid="all-in-response-all-in"
-                  onclick={() => respondAllInWait({ action: 'all-in' })}>全押</Button
-                >
-                <Button
-                  variant="outline"
-                  data-testid="all-in-response-fold"
-                  onclick={() => respondAllInWait({ action: 'fold' })}>弃牌</Button
-                >
-              </div>
             {/if}
             <div class="flex flex-wrap gap-2">
               {#each allInWait.responderIds as responderId (responderId)}
@@ -554,7 +602,30 @@
         </Card>
       {/if}
 
-      {#if game.status === 'all-in-settle' && allInSettlement}
+      {#if allInWait && humanAllInPending}
+        <AlertDialog open={true}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>必须响应全押</AlertDialogTitle>
+              <AlertDialogDescription>
+                {playerName(allInWait.triggerPlayerId)} 已全押，你只能全押或弃牌。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction
+                data-testid="all-in-response-all-in"
+                onclick={() => respondAllInWait({ action: 'all-in' })}>全押</AlertDialogAction
+              >
+              <AlertDialogCancel
+                data-testid="all-in-response-fold"
+                onclick={() => respondAllInWait({ action: 'fold' })}>弃牌</AlertDialogCancel
+              >
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      {/if}
+
+      {#if (game.status === 'all-in-settle' || game.status === 'hand-resolved') && allInSettlement}
         <Card data-testid="all-in-settle-panel">
           <CardHeader><CardTitle>全押结算时间轴</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -600,7 +671,7 @@
         </Card>
       {/if}
 
-      {#if game.status === 'showdown' && game.showdown}
+      {#if (game.status === 'showdown' || game.status === 'hand-resolved') && game.showdown}
         <Card data-testid="showdown-panel">
           <CardHeader><CardTitle>摊牌</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -619,7 +690,7 @@
             </div>
             {#if game.showdown.loserIds.length === 0}
               <Badge variant="outline" data-testid="showdown-tie">全员平局，无人开枪</Badge>
-            {:else}
+            {:else if game.status === 'showdown'}
               <Badge variant="destructive">输者 2.5s 后同时开枪…</Badge>
             {/if}
           </CardContent>
