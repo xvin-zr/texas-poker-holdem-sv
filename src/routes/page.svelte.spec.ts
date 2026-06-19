@@ -27,6 +27,7 @@ describe('首页', () => {
     expect(page.getByTestId('human-hole-card').elements()).toHaveLength(2);
     expect(page.getByTestId('ai-hole-card-hidden').elements()).toHaveLength(6);
     await expect.element(page.getByRole('button', { name: '跟注' })).toBeEnabled();
+    await expect.element(page.getByRole('button', { name: '全押' })).toBeEnabled();
     await expect.element(page.getByText('翻牌前尚未翻开公共牌')).toBeInTheDocument();
     await expect.element(page.getByText('暂无行动')).toBeInTheDocument();
   });
@@ -48,6 +49,71 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
     expect(page.getByTestId('community-card').elements()).toHaveLength(3);
     await expect.element(page.getByText('AI-3 在 翻牌前 选择 跟注')).toBeInTheDocument();
+  });
+
+  it('河牌阶段禁用全押按钮', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 3; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await vi.advanceTimersByTimeAsync(9000);
+    }
+
+    await expect.element(page.getByText('当前阶段：河牌')).toBeInTheDocument();
+    await expect.element(page.getByRole('button', { name: '全押' })).toBeDisabled();
+  });
+
+  it('AI 全押后显示并行等待，人类 7s 超时自动弃牌进入占位结算', async () => {
+    vi.useFakeTimers();
+    // AI-1 在翻牌前全押，等待阶段 AI-2/AI-3 独立响应全押。
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时');
+    await expect.element(page.getByTestId('all-in-response-all-in')).toBeEnabled();
+    await expect.element(page.getByTestId('all-in-response-fold')).toBeEnabled();
+    await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
+    expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
+
+    await vi.advanceTimersByTimeAsync(7000);
+
+    await expect.element(page.getByTestId('all-in-settle-placeholder')).toBeInTheDocument();
+    await expect.element(page.getByText('人类：超时弃牌')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-1：全押')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-2：全押')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-3：全押')).toBeInTheDocument();
+  });
+
+  it('人类全押后只让 AI 并行响应，不显示人类倒计时', async () => {
+    vi.useFakeTimers();
+    // 人类触发全押后，AI-1/2/3 在等待阶段独立响应全押。
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-countdown')).not.toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-response-all-in')).not.toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-response-fold')).not.toBeInTheDocument();
+    expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await expect.element(page.getByTestId('all-in-settle-placeholder')).toBeInTheDocument();
+    await expect.element(page.getByText('人类：全押')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-1：全押')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-2：全押')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-3：全押')).toBeInTheDocument();
   });
 
   it('河牌后显示摊牌亮牌，输者同时开枪后出现胜利屏', async () => {

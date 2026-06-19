@@ -17,6 +17,7 @@ export type EngineError = 'missing-decision-input' | 'invalid-card-count';
 // 弃牌开枪外置定时器：引擎发 effect 让 UI 层 2.5s 后回灌 fold-shoot-expired 事件。
 export const FOLD_SHOOT_DELAY_MS = 2500;
 export const SHOWDOWN_SHOOT_DELAY_MS = 2500;
+export const ALL_IN_HUMAN_TIMEOUT_MS = 7000;
 export const FOLD_SHOOT_CAP_PROBABILITY = 0.95;
 export type EngineEffect =
   | { type: 'schedule-fold-shoot'; playerId: PlayerId; timerId: string }
@@ -66,6 +67,22 @@ export type ActionRecord = {
   decision: Decision;
 };
 
+export type AllInWaitState = {
+  timerId: string;
+  triggerPlayerId: PlayerId;
+  responderIds: PlayerId[];
+  respondedIds: PlayerId[];
+  timedOutIds: PlayerId[];
+};
+
+export type AllInSettlementState = {
+  triggerPlayerId: PlayerId;
+  responderIds: PlayerId[];
+  allInPlayerIds: PlayerId[];
+  foldedPlayerIds: PlayerId[];
+  timedOutIds: PlayerId[];
+};
+
 export type DecisionInput = {
   stage: Stage;
   myBetThisHand: number;
@@ -89,7 +106,7 @@ export type Player = PublicPlayer & {
   holeCards: [Card, Card];
 };
 
-export type GameStatus = 'idle' | 'playing' | 'showdown' | 'won';
+export type GameStatus = 'idle' | 'playing' | 'all-in-settle' | 'showdown' | 'won';
 
 export type GameState = {
   status: GameStatus;
@@ -101,6 +118,8 @@ export type GameState = {
   actionHistory: ActionRecord[];
   actedThisStage: PlayerId[];
   pendingAllIn: boolean;
+  allInWait: AllInWaitState | null;
+  allInSettlement: AllInSettlementState | null;
   // 弃牌开枪阻塞期间记录待开枪玩家，行动轮暂停直到 fold-shoot-expired 回灌。
   pendingFoldShoot: PlayerId | null;
   showdown: ShowdownState | null;
@@ -111,6 +130,7 @@ export type GameEvent =
   | { type: 'start-game'; deck?: Card[] }
   | { type: 'player-action'; playerId: PlayerId; decision: Decision }
   | { type: 'ai-think-expired'; playerId: PlayerId; decision: Decision }
+  | { type: 'all-in-timeout'; playerId: PlayerId }
   | { type: 'timer-expired'; timerId: string }
   | {
       type: 'fold-shoot-expired';
@@ -141,6 +161,8 @@ export const initialState: GameState = {
   actionHistory: [],
   actedThisStage: [],
   pendingAllIn: false,
+  allInWait: null,
+  allInSettlement: null,
   pendingFoldShoot: null,
   showdown: null,
   winnerId: null,
@@ -315,6 +337,13 @@ export function engine(state: GameState, event: GameEvent): EngineResult {
   if (state.status !== 'playing') return { state, effects: [] };
   if (event.type === 'fold-shoot-expired')
     return { state: applyFoldShoot(state, event), effects: [] };
+  if (state.allInWait) {
+    if (event.type === 'all-in-timeout')
+      return { state: applyAllInTimeout(state, event.playerId), effects: [] };
+    if (event.type === 'player-action' || event.type === 'ai-think-expired')
+      return applyAllInResponse(state, event.playerId, event.decision);
+    return { state, effects: [] };
+  }
   if (event.type === 'player-action' || event.type === 'ai-think-expired') {
     if (event.playerId !== state.currentActorId) return { state, effects: [] };
     return applyDecision(state, event.playerId, event.decision);
@@ -339,8 +368,7 @@ function startGame(deck: Card[]): GameState {
 }
 
 function applyDecision(state: GameState, playerId: PlayerId, decision: Decision): EngineResult {
-  // ponytail: All-in 留到切片 5；本切片忽略误发事件，避免进入半实现状态。
-  if (decision.action === 'all-in') return { state, effects: [] };
+  if (decision.action === 'all-in') return applyAllInTrigger(state, playerId, decision);
   if (decision.action === 'fold') return applyFold(state, playerId);
 
   const players = state.players.map((player) =>
@@ -354,6 +382,102 @@ function applyDecision(state: GameState, playerId: PlayerId, decision: Decision)
     actedThisStage: [...new Set([...state.actedThisStage, playerId])],
   };
   return withShowdownEffect(advance(next));
+}
+
+function applyAllInTrigger(state: GameState, playerId: PlayerId, decision: Decision): EngineResult {
+  if (state.stage === 'river') return { state, effects: [] };
+  const players = state.players.map((player) =>
+    player.id === playerId ? { ...player, allIn: true, betThisHand: 8 } : player,
+  );
+  const responderIds = players
+    .filter((player) => player.id !== playerId && player.alive && !player.folded && !player.allIn)
+    .map((player) => player.id);
+  const next: GameState = {
+    ...state,
+    players,
+    currentActorId: null,
+    actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision }],
+    actedThisStage: [],
+    pendingAllIn: responderIds.length > 0,
+    allInWait: {
+      timerId: `all-in:${state.actionHistory.length + 1}:${playerId}`,
+      triggerPlayerId: playerId,
+      responderIds,
+      respondedIds: [],
+      timedOutIds: [],
+    },
+    allInSettlement: null,
+  };
+  return { state: responderIds.length === 0 ? enterAllInSettlement(next) : next, effects: [] };
+}
+
+function applyAllInResponse(
+  state: GameState,
+  playerId: PlayerId,
+  decision: Decision,
+  timedOut = false,
+): EngineResult {
+  const wait = state.allInWait;
+  if (!wait || decision.action === 'call') return { state, effects: [] };
+  if (!wait.responderIds.includes(playerId) || wait.respondedIds.includes(playerId))
+    return { state, effects: [] };
+
+  const players = state.players.map((player) => {
+    if (player.id !== playerId) return player;
+    return decision.action === 'all-in'
+      ? { ...player, allIn: true, folded: false, betThisHand: 8 }
+      : { ...player, folded: true };
+  });
+  const nextWait: AllInWaitState = {
+    ...wait,
+    respondedIds: [...wait.respondedIds, playerId],
+    timedOutIds: timedOut ? [...wait.timedOutIds, playerId] : wait.timedOutIds,
+  };
+  const next: GameState = {
+    ...state,
+    players,
+    currentActorId: null,
+    actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision }],
+    actedThisStage: [],
+    pendingAllIn: true,
+    allInWait: nextWait,
+  };
+  return {
+    state:
+      nextWait.respondedIds.length === nextWait.responderIds.length
+        ? enterAllInSettlement(next)
+        : next,
+    effects: [],
+  };
+}
+
+function applyAllInTimeout(state: GameState, playerId: PlayerId): GameState {
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (!player?.isHuman) return state;
+  return applyAllInResponse(state, playerId, { action: 'fold' }, true).state;
+}
+
+function enterAllInSettlement(state: GameState): GameState {
+  const wait = state.allInWait;
+  if (!wait) return state;
+  return {
+    ...state,
+    status: 'all-in-settle',
+    currentActorId: null,
+    pendingAllIn: false,
+    allInWait: null,
+    allInSettlement: {
+      triggerPlayerId: wait.triggerPlayerId,
+      responderIds: wait.responderIds,
+      allInPlayerIds: state.players
+        .filter((player) => player.alive && !player.folded && player.allIn)
+        .map((player) => player.id),
+      foldedPlayerIds: wait.responderIds.filter(
+        (id) => state.players.find((player) => player.id === id)?.folded,
+      ),
+      timedOutIds: wait.timedOutIds,
+    },
+  };
 }
 
 // 弃牌（非 All-in）：标记 folded、阻塞行动轮、外置 2.5s 开枪定时器。
@@ -567,6 +691,8 @@ function dealNextHand(state: GameState, deck: Card[]): GameState {
     actedThisStage: [],
     currentActorId: null,
     pendingAllIn: false,
+    allInWait: null,
+    allInSettlement: null,
     pendingFoldShoot: null,
     showdown: null,
     winnerId: null,

@@ -167,16 +167,147 @@ describe('引擎 reducer', () => {
     expect(state.communityCards).toHaveLength(5);
   });
 
-  it('本切片忽略全押事件，避免进入未实现等待状态', () => {
+  it('全押会把水位拉到 8 并立即中断行动轮，已 Call 玩家重新待响应', () => {
     const started = engine(initialState, { type: 'start-game' }).state;
+    const afterHumanCall = act(started, 'human');
 
-    const afterAllIn = engine(started, {
+    const afterAllIn = engine(afterHumanCall, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'all-in' },
+    }).state;
+
+    expect(afterAllIn.players.find((player) => player.id === 'ai-1')).toMatchObject({
+      allIn: true,
+      betThisHand: 8,
+    });
+    expect(afterAllIn.players.find((player) => player.id === 'human')?.betThisHand).toBe(2);
+    expect(afterAllIn.currentActorId).toBe(null);
+    expect(afterAllIn.actedThisStage).toEqual([]);
+    expect(afterAllIn.pendingAllIn).toBe(true);
+    expect(afterAllIn.allInWait).toMatchObject({
+      triggerPlayerId: 'ai-1',
+      responderIds: ['human', 'ai-2', 'ai-3'],
+      respondedIds: [],
+    });
+  });
+
+  it('全押等待允许待响应者并行乱序响应，禁止 Call 与触发者再次行动', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const afterHumanCall = act(started, 'human');
+    const waiting = engine(afterHumanCall, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'all-in' },
+    }).state;
+
+    const callIgnored = engine(waiting, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'call' },
+    }).state;
+    const triggerIgnored = engine(waiting, {
+      type: 'ai-think-expired',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    const ai3First = engine(waiting, {
+      type: 'ai-think-expired',
+      playerId: 'ai-3',
+      decision: { action: 'all-in' },
+    }).state;
+    const humanFolded = engine(ai3First, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+    const settled = engine(humanFolded, {
+      type: 'ai-think-expired',
+      playerId: 'ai-2',
+      decision: { action: 'fold' },
+    }).state;
+
+    expect(callIgnored).toEqual(waiting);
+    expect(triggerIgnored).toEqual(waiting);
+    expect(ai3First.allInWait?.respondedIds).toEqual(['ai-3']);
+    expect(ai3First.players.find((player) => player.id === 'ai-3')).toMatchObject({
+      allIn: true,
+      betThisHand: 8,
+    });
+    expect(settled.status).toBe('all-in-settle');
+    expect(settled.pendingAllIn).toBe(false);
+    expect(settled.allInWait).toBe(null);
+    expect(settled.allInSettlement).toMatchObject({
+      triggerPlayerId: 'ai-1',
+      allInPlayerIds: ['ai-1', 'ai-3'],
+      foldedPlayerIds: ['human', 'ai-2'],
+    });
+    // 已 Call 的水位不撤回，后续 5b 开枪按这个水位算。
+    expect(settled.players.find((player) => player.id === 'human')).toMatchObject({
+      folded: true,
+      betThisHand: 2,
+    });
+  });
+
+  it('全押等待的人类超时会自动弃牌，AI 超时事件被忽略', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const afterHumanCall = act(started, 'human');
+    const waiting = engine(afterHumanCall, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'all-in' },
+    }).state;
+
+    const aiTimeoutIgnored = engine(waiting, { type: 'all-in-timeout', playerId: 'ai-2' }).state;
+    const humanTimedOut = engine(waiting, { type: 'all-in-timeout', playerId: 'human' }).state;
+
+    expect(aiTimeoutIgnored).toEqual(waiting);
+    expect(humanTimedOut.players.find((player) => player.id === 'human')?.folded).toBe(true);
+    expect(humanTimedOut.allInWait?.respondedIds).toEqual(['human']);
+    expect(humanTimedOut.allInWait?.timedOutIds).toEqual(['human']);
+    expect(humanTimedOut.status).toBe('playing');
+  });
+
+  it('全押待响应者为 0 时立即进入结算占位', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const onlyHumanActive = {
+      ...started,
+      players: started.players.map((player) =>
+        player.id === 'human' ? player : { ...player, folded: true },
+      ),
+    } satisfies GameState;
+
+    const settled = engine(onlyHumanActive, {
       type: 'player-action',
       playerId: 'human',
       decision: { action: 'all-in' },
     }).state;
 
-    expect(afterAllIn).toEqual(started);
+    expect(settled.status).toBe('all-in-settle');
+    expect(settled.allInWait).toBe(null);
+    expect(settled.allInSettlement).toMatchObject({
+      triggerPlayerId: 'human',
+      responderIds: [],
+      allInPlayerIds: ['human'],
+    });
+  });
+
+  it('河牌阶段引擎拒绝全押', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const river = {
+      ...started,
+      stage: 'river',
+      currentActorId: 'human',
+      communityCards: defaultDeck.slice(8, 13),
+    } satisfies GameState;
+
+    const rejected = engine(river, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'all-in' },
+    }).state;
+
+    expect(rejected).toEqual(river);
   });
 
   it('AI 思考到期事件才会应用决策', () => {
