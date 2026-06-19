@@ -8,9 +8,12 @@
   import CardTitle from '$lib/components/ui/card/card-title.svelte';
   import Card from '$lib/components/ui/card/card.svelte';
   import {
+    defaultDeck,
     engine,
+    FOLD_SHOOT_DELAY_MS,
     initialState,
     randomThinkDelayMs,
+    shuffleDeck,
     weightedAiDecision,
     type Card as PlayingCard,
     type Decision,
@@ -19,6 +22,8 @@
   } from '$lib/engine';
 
   let game: GameState = $state(initialState);
+  // 最近一次弃牌开枪结果，用于展示揭示过渡（存活退出标记 / 致死作废过渡）。
+  let lastShoot = $state<{ playerId: PlayerId; died: boolean } | null>(null);
   const currentActor = $derived(game.players.find((player) => player.id === game.currentActorId));
   const currentActorName = $derived(currentActor?.name ?? '无');
   const currentStageName = $derived(game.stage ? stageText(game.stage) : '未开始');
@@ -28,6 +33,25 @@
   const thinkingPlayerName = $derived(
     game.players.find((player) => player.id === thinkingPlayerId)?.name ?? '',
   );
+  // 弃牌开枪阻塞期间展示的玩家（外置 2.5s 定时器由 UI 层持有）。
+  const pendingShootPlayer = $derived(
+    game.pendingFoldShoot
+      ? game.players.find((player) => player.id === game.pendingFoldShoot) ?? null
+      : null,
+  );
+  const winner = $derived(
+    game.status === 'won' && game.winnerId
+      ? game.players.find((player) => player.id === game.winnerId) ?? null
+      : null,
+  );
+  const lastShootLabel = $derived.by(() => {
+    const shoot = lastShoot;
+    if (!shoot) return null;
+    const name = game.players.find((player) => player.id === shoot.playerId)?.name ?? '';
+    const outcome = shoot.died ? '死亡' : '存活';
+    const suffix = shoot.died && game.status === 'playing' ? '·本手作废' : '';
+    return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
+  });
 
   $effect(() => {
     if (!thinkingPlayerId || !currentActor || currentActor.isHuman) return;
@@ -41,6 +65,26 @@
         decision: weightedAiDecision(personality, stage, Math.random, ['call', 'fold']),
       }).state;
     }, randomThinkDelayMs());
+    return () => clearTimeout(timeout);
+  });
+
+  // 弃牌开枪定时器外置：pendingFoldShoot 置位后 2.5s 回灌到期事件，roll 与洗牌由 UI 注入。
+  $effect(() => {
+    const pending = game.pendingFoldShoot;
+    if (!pending) return;
+    const timeout = setTimeout(() => {
+      const roll = Math.random();
+      const before = game.players.find((player) => player.id === pending)?.alive ?? false;
+      const next = engine(game, {
+        type: 'fold-shoot-expired',
+        playerId: pending,
+        roll,
+        nextDeck: shuffleDeck(defaultDeck),
+      }).state;
+      const after = next.players.find((player) => player.id === pending)?.alive ?? false;
+      game = next;
+      lastShoot = { playerId: pending, died: before && !after };
+    }, FOLD_SHOOT_DELAY_MS);
     return () => clearTimeout(timeout);
   });
 
@@ -91,11 +135,33 @@
           <Button size="lg" onclick={startGame}>开始游戏</Button>
         </CardContent>
       </Card>
+    {:else if game.status === 'won'}
+      <Card class="max-w-xl" data-testid="win-screen">
+        <CardHeader><CardTitle>胜利</CardTitle></CardHeader>
+        <CardContent class="space-y-4">
+          <p class="text-muted-foreground">
+            {winner?.name ?? '无人'} 是最后一名存活玩家。
+          </p>
+        </CardContent>
+      </Card>
     {:else}
       <div class="flex flex-wrap gap-2">
         <Badge>当前阶段：{currentStageName}</Badge>
         <Badge variant="secondary">当前行动者：{currentActorName}</Badge>
         {#if thinkingPlayerName}<Badge variant="outline">{thinkingPlayerName} 正在思考…</Badge>{/if}
+        {#if pendingShootPlayer}
+          <Badge variant="destructive" data-testid="fold-shoot-pending"
+            >{pendingShootPlayer.name} 弃牌，2.5s 后开枪…</Badge
+          >
+        {/if}
+        {#if lastShootLabel}
+          <Badge
+            variant={lastShootLabel.died ? 'destructive' : 'outline'}
+            data-testid="fold-shoot-result"
+          >
+            {lastShootLabel.text}
+          </Badge>
+        {/if}
       </div>
 
       <Card>
@@ -130,7 +196,7 @@
 
       <div class="grid gap-4 md:grid-cols-2" data-testid="seats">
         {#each game.players as player (player.id)}
-          <Card data-testid="seat">
+          <Card data-testid="seat" class={player.alive ? '' : 'opacity-50'}>
             <CardHeader class="gap-3">
               <CardTitle>{player.name}</CardTitle>
               <div class="flex flex-wrap gap-2">
@@ -138,9 +204,9 @@
                   身份：{player.isHuman ? '人类' : 'AI'}
                 </Badge>
                 <Badge variant={player.alive ? 'outline' : 'destructive'}
-                  >{player.alive ? '存活' : '死亡'}</Badge
+                  >{player.alive ? '存活' : '出局'}</Badge
                 >
-                {#if player.folded}<Badge variant="destructive">弃牌</Badge>{/if}
+                {#if player.folded}<Badge variant="destructive" data-testid="folded-badge">弃牌</Badge>{/if}
                 {#if player.allIn}<Badge>全押</Badge>{/if}
                 {#if player.id === game.currentActorId}<Badge>行动中</Badge>{/if}
               </div>

@@ -8,14 +8,17 @@ import {
   defaultDeck,
   engine,
   evaluateBestHand,
+  foldShootDeathProbability,
   initialState,
   randomThinkDelayMs,
+  shuffleDeck,
   weightedAiDecision,
   type AiDecider,
   type Card,
   type Decision,
   type GameState,
   type HandRank,
+  type PlayerId,
 } from './engine';
 
 const c = (rank: Card['rank'], suit: Card['suit']): Card => ({ rank, suit });
@@ -28,6 +31,21 @@ const act = (
   playerId: NonNullable<GameState['currentActorId']>,
   action: Decision['action'] = 'call',
 ) => engine(state, { type: 'player-action', playerId, decision: { action } }).state;
+
+// 弃牌后立即以存活结果结算开枪（roll 足够大 → 不死），用于需要继续推进的测试。
+const foldSurvive = (state: GameState, playerId: PlayerId, nextDeck?: Card[]) => {
+  const folded = engine(state, {
+    type: 'player-action',
+    playerId,
+    decision: { action: 'fold' },
+  });
+  return engine(folded.state, {
+    type: 'fold-shoot-expired',
+    playerId,
+    roll: 0.999,
+    nextDeck,
+  }).state;
+};
 
 describe('引擎 reducer', () => {
   it('开始游戏会进入第一手 preflop 初始状态', () => {
@@ -87,7 +105,7 @@ describe('引擎 reducer', () => {
   it('行动轮跳过弃牌者，每个新阶段从人类开始并翻开公共牌', () => {
     let state = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
     state = act(state, 'human');
-    state = act(state, 'ai-1', 'fold');
+    state = foldSurvive(state, 'ai-1');
     expect(state.currentActorId).toBe('ai-2');
 
     state = act(state, 'ai-2');
@@ -137,6 +155,226 @@ describe('引擎 reducer', () => {
     expect(unchanged).toEqual(waiting);
     expect(decided.players.find((player) => player.id === 'ai-1')?.betThisHand).toBe(2);
     expect(decided.currentActorId).toBe('ai-2');
+  });
+});
+
+describe('弃牌开枪', () => {
+  it('弃牌后行动轮阻塞并外置 2.5s 开枪定时器，不内置 setTimeout', () => {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    const started = engine(initialState, { type: 'start-game' }).state;
+
+    const result = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    });
+
+    expect(result.effects).toEqual([
+      { type: 'schedule-fold-shoot', playerId: 'human', timerId: 'fold-shoot:human' },
+    ]);
+    expect(result.state.currentActorId).toBe(null);
+    expect(result.state.pendingFoldShoot).toBe('human');
+    expect(result.state.players.find((player) => player.id === 'human')?.folded).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('fold-shoot-expired 事件驱动生死判定，存活则退出本手并继续行动轮', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const folded = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+
+    const survived = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'human',
+      roll: 0.999,
+    }).state;
+
+    expect(survived.pendingFoldShoot).toBe(null);
+    expect(survived.players.find((player) => player.id === 'human')?.alive).toBe(true);
+    expect(survived.players.find((player) => player.id === 'human')?.folded).toBe(true);
+    expect(survived.currentActorId).toBe('ai-1');
+  });
+
+  it('存活退出时场上只剩 1 名活跃玩家也不直接判胜，而是继续行动轮', () => {
+    // 只剩人类与 ai-1 活跃，其余两手提前死亡移除。
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const onlyTwo = {
+      ...started,
+      players: started.players.map((player) =>
+        player.id === 'ai-2' || player.id === 'ai-3' ? { ...player, alive: false } : player,
+      ),
+    } as GameState;
+
+    // 人类跟注后 ai-1 弃牌存活 → 仅剩人类活跃，但不判胜，轮到人类继续。
+    const afterHuman = act(onlyTwo, 'human');
+    const folded = engine(afterHuman, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    const survived = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0.999,
+    }).state;
+
+    expect(survived.status).toBe('playing');
+    expect(survived.winnerId).toBe(null);
+    expect(survived.stage).toBe('flop');
+    expect(survived.currentActorId).toBe('human');
+  });
+
+  it('死亡且 ≥2 存活 → 本手作废、洗牌进下一手，死者移除且下注不退还', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    // 人类多跟注几次抬高水位，保证开枪致死。
+    let state = act(started, 'human');
+    state = act(state, 'ai-1');
+    state = act(state, 'ai-2');
+    state = act(state, 'ai-3');
+    // flop：人类再跟注到 betThisHand=3，仍 <8，用 roll=0 强制致死
+    state = act(state, 'human');
+
+    const folded = engine(state, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    const nextDeck = shuffleDeck(defaultDeck, () => 0);
+    const voided = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0,
+      nextDeck,
+    }).state;
+
+    expect(voided.status).toBe('playing');
+    expect(voided.stage).toBe('preflop');
+    expect(voided.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    // 其他人下注不退还：新一手 ante 重置为 1（本手下注不退还体现为本手作废重开）
+    expect(voided.players.filter((player) => player.alive).every((player) => player.betThisHand === 1)).toBe(true);
+    expect(voided.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(voided.actionHistory).toEqual([]);
+    expect(voided.currentActorId).toBe('human');
+  });
+
+  it('死亡且仅剩 1 存活 → 触发胜利判定（占位）', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const onlyTwo = {
+      ...started,
+      players: started.players.map((player) =>
+        player.id === 'ai-2' || player.id === 'ai-3' ? { ...player, alive: false } : player,
+      ),
+    } as GameState;
+
+    // 人类跟注后 ai-1 弃牌致死 → 仅剩人类存活 → 胜利。
+    const afterHuman = act(onlyTwo, 'human');
+    const folded = engine(afterHuman, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    const won = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0,
+    }).state;
+
+    expect(won.status).toBe('won');
+    expect(won.winnerId).toBe('human');
+    expect(won.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+  });
+
+  it('死亡概率 = betThisHand ÷ 8，≥8 封顶 95%', () => {
+    expect(foldShootDeathProbability(1)).toBeCloseTo(0.125);
+    expect(foldShootDeathProbability(5)).toBeCloseTo(0.625);
+    expect(foldShootDeathProbability(7)).toBeCloseTo(0.875);
+    expect(foldShootDeathProbability(8)).toBe(0.95);
+    expect(foldShootDeathProbability(12)).toBe(0.95);
+  });
+
+  it('各水位生死边界：roll < 概率致死，roll ≥ 概率存活', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    // betThisHand=1 → 0.125
+    const folded1 = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+    expect(
+      engine(folded1, { type: 'fold-shoot-expired', playerId: 'human', roll: 0.124 }).state.players.find(
+        (player) => player.id === 'human',
+      )?.alive,
+    ).toBe(false);
+    const folded2 = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+    expect(
+      engine(folded2, { type: 'fold-shoot-expired', playerId: 'human', roll: 0.126 }).state.players.find(
+        (player) => player.id === 'human',
+      )?.alive,
+    ).toBe(true);
+  });
+
+  it('Fold 底牌状态保持隐藏：弃牌玩家底牌不翻开（引擎不改底牌可见性）', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const humanHole = started.players.find((player) => player.id === 'human')?.holeCards;
+    const folded = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+    const survived = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'human',
+      roll: 0.999,
+    }).state;
+
+    expect(survived.players.find((player) => player.id === 'human')?.holeCards).toEqual(humanHole);
+  });
+
+  it('死亡玩家从整局移除，后续手行动顺序跳过死者', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    let state = act(started, 'human');
+    // ai-1 弃牌致死（roll=0），其余 3 存活 → 本手作废进下一手
+    const folded = engine(state, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    state = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0,
+      nextDeck: shuffleDeck(defaultDeck, () => 0),
+    }).state;
+
+    expect(state.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    expect(state.currentActorId).toBe('human');
+    // 新一手人类跟注后，下一行动者应跳过已死的 ai-1，落到 ai-2
+    state = act(state, 'human');
+    expect(state.currentActorId).toBe('ai-2');
+  });
+
+  it('pendingFoldShoot 不匹配的 fold-shoot-expired 事件被忽略', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const folded = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+    const ignored = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0,
+    }).state;
+
+    expect(ignored).toEqual(folded);
   });
 });
 

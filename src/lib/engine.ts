@@ -13,6 +13,12 @@ export type Card = {
 
 export type Decision = { action: 'call' | 'fold' | 'all-in' };
 export type EngineError = 'missing-decision-input' | 'invalid-card-count';
+
+// 弃牌开枪外置定时器：引擎发 effect 让 UI 层 2.5s 后回灌 fold-shoot-expired 事件。
+export const FOLD_SHOOT_DELAY_MS = 2500;
+export const FOLD_SHOOT_CAP_PROBABILITY = 0.95;
+export type EngineEffect =
+  | { type: 'schedule-fold-shoot'; playerId: PlayerId; timerId: string };
 export type HandCategory =
   | 'high-card'
   | 'one-pair'
@@ -70,8 +76,10 @@ export type Player = PublicPlayer & {
   holeCards: [Card, Card];
 };
 
+export type GameStatus = 'idle' | 'playing' | 'showdown' | 'won';
+
 export type GameState = {
-  status: 'idle' | 'playing' | 'showdown';
+  status: GameStatus;
   stage: Stage | null;
   players: Player[];
   communityCards: Card[];
@@ -80,17 +88,28 @@ export type GameState = {
   actionHistory: ActionRecord[];
   actedThisStage: PlayerId[];
   pendingAllIn: boolean;
+  // 弃牌开枪阻塞期间记录待开枪玩家，行动轮暂停直到 fold-shoot-expired 回灌。
+  pendingFoldShoot: PlayerId | null;
+  winnerId: PlayerId | null;
 };
 
 export type GameEvent =
   | { type: 'start-game'; deck?: Card[] }
   | { type: 'player-action'; playerId: PlayerId; decision: Decision }
   | { type: 'ai-think-expired'; playerId: PlayerId; decision: Decision }
-  | { type: 'timer-expired'; timerId: string };
+  | { type: 'timer-expired'; timerId: string }
+  | {
+      type: 'fold-shoot-expired';
+      playerId: PlayerId;
+      roll: number;
+      nextDeck?: Card[];
+    };
+
+export type FoldShootExpired = Extract<GameEvent, { type: 'fold-shoot-expired' }>;
 
 export type EngineResult = {
   state: GameState;
-  effects: never[];
+  effects: EngineEffect[];
 };
 
 export const initialState: GameState = {
@@ -103,7 +122,23 @@ export const initialState: GameState = {
   actionHistory: [],
   actedThisStage: [],
   pendingAllIn: false,
+  pendingFoldShoot: null,
+  winnerId: null,
 };
+
+// 弃牌开枪死亡概率 = betThisHand ÷ 8，≥8 封顶 95%。roll 由外层注入保持 reducer 纯净。
+export function foldShootDeathProbability(betThisHand: number): number {
+  return betThisHand >= 8 ? FOLD_SHOOT_CAP_PROBABILITY : betThisHand / 8;
+}
+
+export function shuffleDeck(deck: Card[], random = Math.random): Card[] {
+  const next = [...deck];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [next[index], next[swap]] = [next[swap]!, next[index]!];
+  }
+  return next;
+}
 
 const seats = [
   { id: 'human', name: '人类', isHuman: true },
@@ -256,46 +291,45 @@ export function engine(state: GameState, event: GameEvent): EngineResult {
   if (event.type === 'start-game')
     return { state: startGame(event.deck ?? defaultDeck), effects: [] };
   if (state.status !== 'playing') return { state, effects: [] };
+  if (event.type === 'fold-shoot-expired')
+    return { state: applyFoldShoot(state, event), effects: [] };
   if (event.type === 'player-action' || event.type === 'ai-think-expired') {
     if (event.playerId !== state.currentActorId) return { state, effects: [] };
-    return { state: applyDecision(state, event.playerId, event.decision), effects: [] };
+    return applyDecision(state, event.playerId, event.decision);
   }
   return { state, effects: [] };
 }
 
 function startGame(deck: Card[]): GameState {
-  return {
+  const base: GameState = {
+    ...initialState,
     status: 'playing',
-    stage: 'preflop',
-    players: seats.map((seat, index) => ({
+    players: seats.map((seat) => ({
       ...seat,
       alive: true,
       folded: false,
       allIn: false,
-      betThisHand: 1,
-      holeCards: [deck[index * 2]!, deck[index * 2 + 1]!],
+      betThisHand: 0,
+      holeCards: [defaultDeck[0]!, defaultDeck[1]!],
     })),
-    communityCards: [],
-    deck: deck.slice(8),
-    currentActorId: 'human',
-    actionHistory: [],
-    actedThisStage: [],
-    pendingAllIn: false,
   };
+  return dealNextHand(base, deck);
 }
 
-function applyDecision(state: GameState, playerId: PlayerId, decision: Decision): GameState {
+function applyDecision(
+  state: GameState,
+  playerId: PlayerId,
+  decision: Decision,
+): EngineResult {
   // ponytail: All-in 留到切片 5；本切片忽略误发事件，避免进入半实现状态。
-  if (decision.action === 'all-in') return state;
-  const players = state.players.map((player) => {
-    if (player.id !== playerId) return player;
-    return {
-      ...player,
-      betThisHand: decision.action === 'call' ? player.betThisHand + 1 : player.betThisHand,
-      folded: decision.action === 'fold' ? true : player.folded,
-      allIn: player.allIn,
-    };
-  });
+  if (decision.action === 'all-in') return { state, effects: [] };
+  if (decision.action === 'fold') return applyFold(state, playerId);
+
+  const players = state.players.map((player) =>
+    player.id === playerId
+      ? { ...player, betThisHand: player.betThisHand + 1 }
+      : player,
+  );
   const next: GameState = {
     ...state,
     players,
@@ -303,7 +337,60 @@ function applyDecision(state: GameState, playerId: PlayerId, decision: Decision)
     actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision }],
     actedThisStage: [...new Set([...state.actedThisStage, playerId])],
   };
-  return advance(next);
+  return { state: advance(next), effects: [] };
+}
+
+// 弃牌（非 All-in）：标记 folded、阻塞行动轮、外置 2.5s 开枪定时器。
+// 玩家已退出本手牌型比较，但生死要等开枪结算。
+function applyFold(state: GameState, playerId: PlayerId): EngineResult {
+  const timerId = `fold-shoot:${playerId}`;
+  const players = state.players.map((player) =>
+    player.id === playerId ? { ...player, folded: true } : player,
+  );
+  const next: GameState = {
+    ...state,
+    players,
+    actionHistory: [...state.actionHistory, { stage: state.stage!, playerId, decision: { action: 'fold' } }],
+    actedThisStage: [...new Set([...state.actedThisStage, playerId])],
+    currentActorId: null,
+    pendingFoldShoot: playerId,
+  };
+  return { state: next, effects: [{ type: 'schedule-fold-shoot', playerId, timerId }] };
+}
+
+// 弃牌开枪到期：按 betThisHand 水位判生死，致死作废本手 / 胜利，存活退出本手继续。
+function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
+  if (state.pendingFoldShoot !== event.playerId) return state;
+  const player = state.players.find((candidate) => candidate.id === event.playerId);
+  if (!player) return state;
+
+  const died = event.roll < foldShootDeathProbability(player.betThisHand);
+  if (!died) {
+    // 存活：从弃牌者位置继续扫描下一活跃玩家，避免依赖 currentActorId=null 的隐式行为。
+    const surviving: GameState = { ...state, pendingFoldShoot: null, currentActorId: event.playerId };
+    return advance(surviving);
+  }
+
+  const players = state.players.map((candidate) =>
+    candidate.id === event.playerId ? { ...candidate, alive: false } : candidate,
+  );
+  const survivors = players.filter((candidate) => candidate.alive);
+  if (survivors.length <= 1) {
+    return {
+      ...state,
+      players,
+      status: 'won',
+      winnerId: survivors[0]?.id ?? null,
+      currentActorId: null,
+      pendingFoldShoot: null,
+    };
+  }
+
+  // 致死且 ≥2 存活：本手作废，洗牌进下一手（死者不参与，其他人下注不退还）。
+  return dealNextHand(
+    { ...state, players, pendingFoldShoot: null, winnerId: null },
+    event.nextDeck ?? defaultDeck,
+  );
 }
 
 function advance(state: GameState): GameState {
@@ -353,6 +440,32 @@ function nextActor(state: GameState) {
 
 function activePlayers(state: GameState) {
   return state.players.filter((player) => player.alive && !player.folded);
+}
+
+// 发新一手：仅存活玩家参与，每人 Ante 1 颗，重新发底牌。死者保留 alive=false 不参与。
+function dealNextHand(state: GameState, deck: Card[]): GameState {
+  let cardIndex = 0;
+  const players = state.players.map((player) => {
+    if (!player.alive) return player;
+    const holeCards: [Card, Card] = [deck[cardIndex]!, deck[cardIndex + 1]!];
+    cardIndex += 2;
+    return { ...player, folded: false, allIn: false, betThisHand: 1, holeCards };
+  });
+  const reset: GameState = {
+    ...state,
+    status: 'playing',
+    stage: 'preflop',
+    players,
+    communityCards: [],
+    deck: deck.slice(cardIndex),
+    actionHistory: [],
+    actedThisStage: [],
+    currentActorId: null,
+    pendingAllIn: false,
+    pendingFoldShoot: null,
+    winnerId: null,
+  };
+  return { ...reset, currentActorId: firstActor(reset) };
 }
 
 function evaluateFive(cards: [Card, Card, Card, Card, Card]): HandRank {
