@@ -3,6 +3,7 @@ import * as Result from 'effect/Result';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createOpenRouterAiDecider, OPENROUTER_DECISION_TIMEOUT_MS } from './ai-decider';
+import { AiDecisionReqSchema } from './ai-decision-schema';
 
 const startedGame = () => engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
 const aiInput = () => {
@@ -15,6 +16,18 @@ describe('OpenRouter AI 决策适配器', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('远程请求 schema 接受人类玩家没有性格', async () => {
+    const input = aiInput();
+
+    const validation = await AiDecisionReqSchema['~standard'].validate({
+      input,
+      personality: 'balanced',
+      legalActions: ['call', 'fold', 'all-in'],
+    });
+
+    expect(validation).toHaveProperty('value');
   });
 
   it('把 DecisionInput、性格和合法动作透传给远程传输', async () => {
