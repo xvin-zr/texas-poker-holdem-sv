@@ -6,6 +6,7 @@
       "name": "texas-poker-holdem-2606",
       "dependencies": {
         "@effect/platform-browser": "^4.0.0-beta.84",
+        "@tanstack/ai": "^0.32.0",
         "@tanstack/ai-openai": "^0.15.1",
         "@tanstack/ai-openrouter": "^0.14.0",
         "@tanstack/ai-svelte": "^0.13.9",

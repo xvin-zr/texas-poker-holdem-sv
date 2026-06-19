@@ -2,6 +2,44 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import { page } from 'vitest/browser';
 
+const remoteMock = vi.hoisted(() => {
+  type Action = 'call' | 'fold' | 'all-in';
+  type Personality = 'conservative' | 'balanced' | 'aggressive';
+  const weights: Record<Personality, Record<Action, number>> = {
+    conservative: { call: 0.25, fold: 0.65, 'all-in': 0.1 },
+    balanced: { call: 0.4, fold: 0.3, 'all-in': 0.3 },
+    aggressive: { call: 0.5, fold: 0.15, 'all-in': 0.35 },
+  };
+
+  return {
+    decideAiActionRemote: vi.fn(
+      async (request: {
+        personality: Personality;
+        legalActions: Action[];
+        input: { stage: string };
+      }) => {
+        // 远程传输 mock：复刻离线权重，只测试页面外部行为。
+        const allowed = new Set(request.legalActions);
+        const entries = Object.entries(weights[request.personality]).filter(
+          ([action]) =>
+            allowed.has(action as Action) &&
+            !(request.input.stage === 'river' && action === 'all-in'),
+        ) as [Action, number][];
+        const candidates = entries.length ? entries : [['fold', 1] as [Action, number]];
+        const total = candidates.reduce((sum, [, weight]) => sum + weight, 0);
+        let roll = Math.random() * total;
+        for (const [action, weight] of candidates) {
+          roll -= weight;
+          if (roll < 0) return { action };
+        }
+        return { action: candidates.at(-1)?.[0] ?? 'fold' };
+      },
+    ),
+  };
+});
+
+vi.mock('./decide.remote', () => remoteMock);
+
 import Page from './+page.svelte';
 
 const flushTimers = async () => {
@@ -10,6 +48,7 @@ const flushTimers = async () => {
 
 describe('首页', () => {
   afterEach(() => {
+    remoteMock.decideAiActionRemote.mockClear();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -151,7 +190,7 @@ describe('首页', () => {
     await expect.element(page.getByTestId('all-in-fold-shoot-empty')).toBeInTheDocument();
   });
 
-  it('All-in 亮牌前隐藏全押 AI，亮牌时仍隐藏弃牌 AI', async () => {
+  it('全押亮牌前隐藏全押 AI，亮牌时仍隐藏弃牌 AI', async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     render(Page);
@@ -173,7 +212,7 @@ describe('首页', () => {
     expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
   });
 
-  it('All-in t=6 有死亡但仍 ≥2 存活会暂停并清掉结果徽章', async () => {
+  it('全押 t=6 有死亡但仍 ≥2 存活会暂停并清掉结果徽章', async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
     render(Page);
@@ -223,7 +262,7 @@ describe('首页', () => {
     await expect.element(page.getByText('人类：弃牌')).toBeInTheDocument();
   });
 
-  it('All-in 弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
+  it('全押弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
     vi.useFakeTimers();
     // AI 全部弃牌且开枪 roll=0 → 三名 AI 死亡，人类直接胜利。
     vi.spyOn(Math, 'random').mockReturnValue(0);

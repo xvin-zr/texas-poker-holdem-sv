@@ -21,7 +21,6 @@
     ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS,
     ALL_IN_SETTLEMENT_REVEAL_DELAY_MS,
     ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS,
-    createWeightedAiDecider,
     decideForAi,
     defaultDeck,
     engine,
@@ -38,6 +37,8 @@
   import * as Match from 'effect/Match';
   import * as Result from 'effect/Result';
   import { onDestroy } from 'svelte';
+
+  import { createOpenRouterAiDecider } from './ai-decider';
 
   let game: GameState = $state(initialState);
   // 最近一次弃牌开枪结果，用于展示揭示过渡（存活退出标记 / 致死作废过渡）。
@@ -122,7 +123,7 @@
     if (!thinkingPlayerId || !currentActor || currentActor.isHuman) return;
     const actorId = currentActor.id;
     const personality = currentActor.personality ?? 'balanced';
-    const decider = createWeightedAiDecider(personality);
+    const decider = createOpenRouterAiDecider(personality);
     let cancelled = false;
     const timeout = setTimeout(async () => {
       const decision = await decideForAi(decider, game, actorId);
@@ -156,7 +157,7 @@
       .map((playerId) => {
         const player = game.players.find((candidate) => candidate.id === playerId);
         const personality = player?.personality ?? 'balanced';
-        const decider = createWeightedAiDecider(personality);
+        const decider = createOpenRouterAiDecider(personality);
         let cancelled = false;
         const timeout = setTimeout(async () => {
           const decision = await decideForAi(decider, game, playerId);
