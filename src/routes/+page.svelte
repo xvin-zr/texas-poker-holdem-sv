@@ -9,6 +9,10 @@
   import Card from '$lib/components/ui/card/card.svelte';
   import {
     ALL_IN_HUMAN_TIMEOUT_MS,
+    ALL_IN_SETTLEMENT_CHOICE_DELAY_MS,
+    ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS,
+    ALL_IN_SETTLEMENT_REVEAL_DELAY_MS,
+    ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS,
     defaultDeck,
     engine,
     FOLD_SHOOT_DELAY_MS,
@@ -21,7 +25,9 @@
     type Decision,
     type GameState,
     type PlayerId,
+    type ShootResult,
   } from '$lib/engine';
+  import * as Match from 'effect/Match';
   import { onDestroy } from 'svelte';
 
   let game: GameState = $state(initialState);
@@ -29,12 +35,16 @@
   let lastShoot = $state<{ playerId: PlayerId; died: boolean } | null>(null);
   // 最近一次摊牌输者开枪结果，跨入下一手 / 胜利屏后仍展示一次。
   let lastShowdownShoot = $state<{ loserIds: PlayerId[]; diedIds: PlayerId[] } | null>(null);
+  let lastAllInFoldShoot = $state<ShootResult[] | null>(null);
+  let lastAllInShoot = $state<{ loserIds: PlayerId[]; diedIds: PlayerId[] } | null>(null);
   let allInHumanRemaining = $state(ALL_IN_HUMAN_TIMEOUT_MS / 1000);
   let activeHumanAllInTimerId: string | null = null;
   let humanAllInTimeout: ReturnType<typeof setTimeout> | null = null;
   let humanAllInInterval: ReturnType<typeof setInterval> | null = null;
   let activeAllInAiTimerId: string | null = null;
   let allInAiTimeouts: ReturnType<typeof setTimeout>[] = [];
+  let activeAllInSettlementTimerKey: string | null = null;
+  let allInSettlementTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const currentActor = $derived(game.players.find((player) => player.id === game.currentActorId));
   const currentActorName = $derived(currentActor?.name ?? '无');
@@ -81,6 +91,22 @@
       .map((id) => `${playerName(id)}${shoot.diedIds.includes(id) ? '死亡' : '存活'}`)
       .join('、');
     return `输者开枪：${text}`;
+  });
+  const lastAllInFoldShootLabel = $derived.by(() => {
+    const results = lastAllInFoldShoot;
+    if (!results || results.length === 0) return null;
+    return `全押弃牌开枪：${results
+      .map((result) => `${playerName(result.playerId)}${result.died ? '死亡' : '存活'}`)
+      .join('、')}`;
+  });
+  const lastAllInShootLabel = $derived.by(() => {
+    const shoot = lastAllInShoot;
+    if (!shoot) return null;
+    if (shoot.loserIds.length === 0) return '全押比牌无人开枪';
+    const text = shoot.loserIds
+      .map((id) => `${playerName(id)}${shoot.diedIds.includes(id) ? '死亡' : '存活'}`)
+      .join('、');
+    return `全押输者开枪：${text}`;
   });
 
   $effect(() => {
@@ -198,19 +224,96 @@
     return () => clearTimeout(timeout);
   });
 
+  // All-in 结算时间轴定时器外置：UI 按 t=0/2.5/3.5/6 回灌事件。
+  $effect(() => {
+    const settlement = game.allInSettlement;
+    if (game.status !== 'all-in-settle' || !settlement) {
+      clearAllInSettlementTimer();
+      activeAllInSettlementTimerKey = null;
+      if (game.status === 'playing') {
+        lastAllInFoldShoot = null;
+        lastAllInShoot = null;
+      }
+      return;
+    }
+    const timerKey = `${settlement.timerId}:${settlement.step}`;
+    if (activeAllInSettlementTimerKey === timerKey) return;
+    clearAllInSettlementTimer();
+    activeAllInSettlementTimerKey = timerKey;
+
+    Match.value(settlement.step).pipe(
+      Match.when('pending', () => {
+        lastAllInFoldShoot = null;
+        lastAllInShoot = null;
+        allInSettlementTimeout = setTimeout(() => {
+          game = engine(game, { type: 'all-in-settlement-choices-expired' }).state;
+        }, ALL_IN_SETTLEMENT_CHOICE_DELAY_MS);
+      }),
+      Match.when('choices', () => {
+        allInSettlementTimeout = setTimeout(() => {
+          const rolls = Object.fromEntries(
+            settlement.foldedPlayerIds.map((id) => [id, Math.random()]),
+          );
+          const beforeAlive = new Set(
+            game.players.filter((player) => player.alive).map((player) => player.id),
+          );
+          const next = engine(game, {
+            type: 'all-in-settlement-fold-shoot-expired',
+            rolls,
+          }).state;
+          lastAllInFoldShoot = settlement.foldedPlayerIds.map((id) => ({
+            playerId: id,
+            died: beforeAlive.has(id) && !next.players.find((player) => player.id === id)?.alive,
+          }));
+          game = next;
+        }, ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS);
+      }),
+      Match.when('fold-shoot', () => {
+        allInSettlementTimeout = setTimeout(() => {
+          game = engine(game, { type: 'all-in-settlement-reveal-expired' }).state;
+        }, ALL_IN_SETTLEMENT_REVEAL_DELAY_MS);
+      }),
+      Match.when('reveal', () => {
+        allInSettlementTimeout = setTimeout(() => {
+          const loserIds = settlement.showdown?.loserIds ?? [];
+          const rolls = Object.fromEntries(loserIds.map((id) => [id, Math.random()]));
+          const beforeAlive = new Set(
+            game.players.filter((player) => player.alive).map((player) => player.id),
+          );
+          const next = engine(game, {
+            type: 'all-in-settlement-showdown-expired',
+            rolls,
+            nextDeck: shuffleDeck(defaultDeck),
+          }).state;
+          const diedIds = loserIds.filter(
+            (id) => beforeAlive.has(id) && !next.players.find((player) => player.id === id)?.alive,
+          );
+          game = next;
+          lastAllInShoot = { loserIds, diedIds };
+        }, ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS);
+      }),
+      Match.exhaustive,
+    );
+  });
+
   onDestroy(() => {
     clearHumanAllInTimer();
     clearAllInAiTimers();
+    clearAllInSettlementTimer();
   });
 
   function startGame() {
     clearHumanAllInTimer();
     clearAllInAiTimers();
+    clearAllInSettlementTimer();
     activeHumanAllInTimerId = null;
     activeAllInAiTimerId = null;
+    activeAllInSettlementTimerKey = null;
     game = engine(game, { type: 'start-game' }).state;
     lastShoot = null;
     lastShowdownShoot = null;
+    lastAllInFoldShoot = null;
+    lastAllInShoot = null;
   }
 
   function act(decision: Decision) {
@@ -233,6 +336,11 @@
   function clearAllInAiTimers() {
     for (const timeout of allInAiTimeouts) clearTimeout(timeout);
     allInAiTimeouts = [];
+  }
+
+  function clearAllInSettlementTimer() {
+    if (allInSettlementTimeout) clearTimeout(allInSettlementTimeout);
+    allInSettlementTimeout = null;
   }
 
   function isAllInResponderPending(playerId: PlayerId) {
@@ -260,6 +368,15 @@
     if (settlement.allInPlayerIds.includes(playerId)) return '全押';
     if (settlement.foldedPlayerIds.includes(playerId)) return '弃牌';
     return '未响应';
+  }
+
+  function allInSettlementStepText(step: NonNullable<GameState['allInSettlement']>['step']) {
+    return {
+      pending: '准备展示选择',
+      choices: 't=0 展示选择',
+      'fold-shoot': 't=2.5 弃牌开枪完成',
+      reveal: 't=3.5 全押亮牌 / t=6 即将比牌开枪',
+    }[step];
   }
 
   function cardText(card: PlayingCard) {
@@ -299,6 +416,13 @@
   function shouldRevealHoleCards(player: GameState['players'][number]) {
     if (player.isHuman) return true;
     if (player.folded) return false;
+    if (
+      game.status === 'all-in-settle' &&
+      allInSettlement?.step === 'reveal' &&
+      allInSettlement.allInPlayerIds.includes(player.id) &&
+      player.alive
+    )
+      return true;
     return game.status === 'showdown' || !player.alive;
   }
 
@@ -340,6 +464,16 @@
               {lastShowdownLabel}
             </Badge>
           {/if}
+          {#if lastAllInFoldShootLabel}
+            <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
+              {lastAllInFoldShootLabel}
+            </Badge>
+          {/if}
+          {#if lastAllInShootLabel}
+            <Badge variant="destructive" data-testid="all-in-shoot-result">
+              {lastAllInShootLabel}
+            </Badge>
+          {/if}
           <Button disabled>重新开始（切片 6）</Button>
         </CardContent>
       </Card>
@@ -354,7 +488,7 @@
           </Badge>
         {/if}
         {#if game.status === 'all-in-settle'}
-          <Badge variant="destructive" data-testid="all-in-settle-badge">全押结算占位</Badge>
+          <Badge variant="destructive" data-testid="all-in-settle-badge">全押结算</Badge>
         {/if}
         {#if pendingShootPlayer}
           <Badge variant="destructive" data-testid="fold-shoot-pending"
@@ -372,6 +506,16 @@
         {#if lastShowdownLabel}
           <Badge variant="destructive" data-testid="showdown-shoot-result">
             {lastShowdownLabel}
+          </Badge>
+        {/if}
+        {#if lastAllInFoldShootLabel}
+          <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
+            {lastAllInFoldShootLabel}
+          </Badge>
+        {/if}
+        {#if lastAllInShootLabel}
+          <Badge variant="destructive" data-testid="all-in-shoot-result">
+            {lastAllInShootLabel}
           </Badge>
         {/if}
       </div>
@@ -411,17 +555,47 @@
       {/if}
 
       {#if game.status === 'all-in-settle' && allInSettlement}
-        <Card data-testid="all-in-settle-placeholder">
-          <CardHeader><CardTitle>全押结算占位</CardTitle></CardHeader>
+        <Card data-testid="all-in-settle-panel">
+          <CardHeader><CardTitle>全押结算时间轴</CardTitle></CardHeader>
           <CardContent class="space-y-3">
-            <p class="text-muted-foreground">等待已结束，完整 t=0/2.5/3.5/6 时间轴留到 5b。</p>
-            <div class="flex flex-wrap gap-2">
-              {#each allInSettlementPlayerIds(allInSettlement) as playerId (playerId)}
-                <Badge variant="secondary" data-testid="all-in-settle-choice">
-                  {playerName(playerId)}：{allInSettlementText(playerId)}
+            <Badge variant="outline" data-testid="all-in-settle-step">
+              {allInSettlementStepText(allInSettlement.step)}
+            </Badge>
+            {#if allInSettlement.step !== 'pending'}
+              <div class="flex flex-wrap gap-2">
+                {#each allInSettlementPlayerIds(allInSettlement) as playerId (playerId)}
+                  <Badge variant="secondary" data-testid="all-in-settle-choice">
+                    {playerName(playerId)}：{allInSettlementText(playerId)}
+                  </Badge>
+                {/each}
+              </div>
+            {/if}
+            {#if allInSettlement.step === 'choices'}
+              <p class="text-muted-foreground">t=2.5 弃牌玩家将同时开枪。</p>
+            {:else if allInSettlement.step === 'fold-shoot' || allInSettlement.step === 'reveal'}
+              {#if allInSettlement.foldShootResults.length === 0}
+                <Badge variant="outline" data-testid="all-in-fold-shoot-empty">
+                  无弃牌玩家开枪
                 </Badge>
-              {/each}
-            </div>
+              {:else}
+                <div class="flex flex-wrap gap-2">
+                  {#each allInSettlement.foldShootResults as result (result.playerId)}
+                    <Badge
+                      variant={result.died ? 'destructive' : 'outline'}
+                      data-testid="all-in-fold-shoot-item"
+                    >
+                      {playerName(result.playerId)}：{result.died ? '死亡' : '存活'}
+                    </Badge>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+            {#if allInSettlement.step === 'reveal'}
+              <Badge variant="secondary" data-testid="all-in-reveal">
+                全押玩家亮牌，公共牌已翻到河牌
+              </Badge>
+              <p class="text-muted-foreground">t=6 比较全押玩家牌型，输者同时开枪。</p>
+            {/if}
           </CardContent>
         </Card>
       {/if}

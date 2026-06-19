@@ -67,6 +67,51 @@ const playToShowdown = (deck: Card[] = defaultDeck) => {
   result = callAllFour(result.state);
   return callAllFour(result.state);
 };
+const allInEveryone = (deck: Card[] = defaultDeck) => {
+  let state = engine(initialState, { type: 'start-game', deck }).state;
+  state = engine(state, {
+    type: 'player-action',
+    playerId: 'human',
+    decision: { action: 'all-in' },
+  }).state;
+  for (const playerId of ['ai-1', 'ai-2', 'ai-3'] as const) {
+    state = engine(state, {
+      type: 'ai-think-expired',
+      playerId,
+      decision: { action: 'all-in' },
+    }).state;
+  }
+  return state;
+};
+const allInWithFoldedResponders = () => {
+  let state = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+  state = act(state, 'human');
+  state = engine(state, {
+    type: 'player-action',
+    playerId: 'ai-1',
+    decision: { action: 'all-in' },
+  }).state;
+  state = engine(state, {
+    type: 'player-action',
+    playerId: 'human',
+    decision: { action: 'fold' },
+  }).state;
+  state = engine(state, {
+    type: 'ai-think-expired',
+    playerId: 'ai-3',
+    decision: { action: 'all-in' },
+  }).state;
+  return engine(state, {
+    type: 'ai-think-expired',
+    playerId: 'ai-2',
+    decision: { action: 'fold' },
+  }).state;
+};
+const revealAllInSettlement = (state: GameState, rolls: Partial<Record<PlayerId, number>> = {}) => {
+  state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+  state = engine(state, { type: 'all-in-settlement-fold-shoot-expired', rolls }).state;
+  return engine(state, { type: 'all-in-settlement-reveal-expired' }).state;
+};
 const tieDeck: Card[] = [
   c('A', '♠'),
   c('K', '♠'),
@@ -322,6 +367,160 @@ describe('引擎 reducer', () => {
     expect(unchanged).toEqual(waiting);
     expect(decided.players.find((player) => player.id === 'ai-1')?.betThisHand).toBe(2);
     expect(decided.currentActorId).toBe('ai-2');
+  });
+});
+
+describe('All-in 结算时间轴', () => {
+  it('由 t=0/2.5/3.5/6 到期事件逐步推进', () => {
+    let state = allInWithFoldedResponders();
+
+    expect(state.status).toBe('all-in-settle');
+    expect(state.allInSettlement?.step).toBe('pending');
+
+    state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+    expect(state.allInSettlement?.step).toBe('choices');
+
+    state = engine(state, {
+      type: 'all-in-settlement-fold-shoot-expired',
+      rolls: { human: 0.999, 'ai-2': 0.999 },
+    }).state;
+    expect(state.allInSettlement?.step).toBe('fold-shoot');
+    expect(state.communityCards).toHaveLength(0);
+    expect(state.players.find((player) => player.id === 'human')?.alive).toBe(true);
+    expect(state.players.find((player) => player.id === 'ai-2')?.alive).toBe(true);
+
+    state = engine(state, { type: 'all-in-settlement-reveal-expired' }).state;
+    expect(state.allInSettlement?.step).toBe('reveal');
+    expect(state.communityCards).toHaveLength(5);
+    expect(state.allInSettlement?.showdown?.entries.map((entry) => entry.playerId)).toEqual([
+      'ai-1',
+      'ai-3',
+    ]);
+
+    state = engine(state, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { 'ai-3': 0.999 },
+      nextDeck: defaultDeck,
+    }).state;
+    expect(state.status).toBe('playing');
+    expect(state.stage).toBe('preflop');
+  });
+
+  it('t=2.5 弃牌玩家同时开枪并按各自已抬高水位判定', () => {
+    let state = allInWithFoldedResponders();
+    state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+
+    state = engine(state, {
+      type: 'all-in-settlement-fold-shoot-expired',
+      // 人类已 Call 到 2：0.2 < 2/8 会死；AI-2 仍为 1：0.2 >= 1/8 存活。
+      rolls: { human: 0.2, 'ai-2': 0.2 },
+    }).state;
+
+    expect(state.players.find((player) => player.id === 'human')).toMatchObject({
+      alive: false,
+      betThisHand: 2,
+    });
+    expect(state.players.find((player) => player.id === 'ai-2')).toMatchObject({
+      alive: true,
+      betThisHand: 1,
+    });
+    expect(state.allInSettlement?.foldShootResults).toEqual([
+      { playerId: 'human', died: true },
+      { playerId: 'ai-2', died: false },
+    ]);
+  });
+
+  it('每步前与弃牌开枪后都会按 ≤1 存活短路到胜利', () => {
+    let state = allInWithFoldedResponders();
+    state = {
+      ...state,
+      players: state.players.map((player) =>
+        player.id === 'ai-3' ? { ...player, alive: false } : player,
+      ),
+    };
+    state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+
+    const wonAfterFoldShoot = engine(state, {
+      type: 'all-in-settlement-fold-shoot-expired',
+      rolls: { human: 0, 'ai-2': 0 },
+    }).state;
+
+    expect(wonAfterFoldShoot.status).toBe('won');
+    expect(wonAfterFoldShoot.winnerId).toBe('ai-1');
+    expect(wonAfterFoldShoot.communityCards).toHaveLength(0);
+
+    const wonBeforeReveal = engine(
+      {
+        ...state,
+        allInSettlement: { ...state.allInSettlement!, step: 'fold-shoot' },
+        players: state.players.map((player) =>
+          player.id === 'ai-1' ? player : { ...player, alive: false },
+        ),
+      },
+      { type: 'all-in-settlement-reveal-expired' },
+    ).state;
+
+    expect(wonBeforeReveal.status).toBe('won');
+    expect(wonBeforeReveal.winnerId).toBe('ai-1');
+    expect(wonBeforeReveal.communityCards).toHaveLength(0);
+  });
+
+  it('t=6 复数输者同时开枪，平局与单人全押无人开枪', () => {
+    const allInReveal = revealAllInSettlement(allInEveryone(defaultDeck));
+    const won = engine(allInReveal, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { 'ai-1': 0, 'ai-2': 0, 'ai-3': 0 },
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(allInReveal.allInSettlement?.showdown?.loserIds).toEqual(['ai-1', 'ai-2', 'ai-3']);
+    expect(won.status).toBe('won');
+    expect(won.winnerId).toBe('human');
+
+    const tieReveal = revealAllInSettlement(allInEveryone(tieDeck));
+    const tieNext = engine(tieReveal, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { human: 0, 'ai-1': 0, 'ai-2': 0, 'ai-3': 0 },
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(tieReveal.allInSettlement?.showdown?.loserIds).toEqual([]);
+    expect(
+      tieReveal.allInSettlement?.showdown?.entries.every((entry) => entry.result === 'tie'),
+    ).toBe(true);
+    expect(tieNext.status).toBe('playing');
+    expect(tieNext.players.every((player) => player.alive)).toBe(true);
+
+    let single = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+    single = engine(single, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'all-in' },
+    }).state;
+    for (const playerId of ['ai-1', 'ai-2', 'ai-3'] as const) {
+      single = engine(single, {
+        type: 'ai-think-expired',
+        playerId,
+        decision: { action: 'fold' },
+      }).state;
+    }
+    const singleReveal = revealAllInSettlement(single, {
+      'ai-1': 0.999,
+      'ai-2': 0.999,
+      'ai-3': 0.999,
+    });
+    const singleNext = engine(singleReveal, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: {},
+      nextDeck: defaultDeck,
+    }).state;
+
+    expect(singleReveal.allInSettlement?.showdown?.loserIds).toEqual([]);
+    expect(singleReveal.allInSettlement?.showdown?.entries).toMatchObject([
+      { playerId: 'human', result: 'winner' },
+    ]);
+    expect(singleNext.status).toBe('playing');
+    expect(singleNext.players.every((player) => player.alive)).toBe(true);
   });
 });
 

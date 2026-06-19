@@ -66,7 +66,7 @@ describe('首页', () => {
     await expect.element(page.getByRole('button', { name: '全押' })).toBeDisabled();
   });
 
-  it('AI 全押后显示并行等待，人类 7s 超时自动弃牌进入占位结算', async () => {
+  it('AI 全押后按 t=0/2.5/3.5/6 揭示结算时间轴', async () => {
     vi.useFakeTimers();
     // AI-1 在翻牌前全押，等待阶段 AI-2/AI-3 独立响应全押。
     vi.spyOn(Math, 'random').mockReturnValue(0.999);
@@ -84,12 +84,33 @@ describe('首页', () => {
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
     await vi.advanceTimersByTimeAsync(7000);
+    await vi.advanceTimersByTimeAsync(0);
 
-    await expect.element(page.getByTestId('all-in-settle-placeholder')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=0 展示选择');
     await expect.element(page.getByText('人类：超时弃牌')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：全押')).toBeInTheDocument();
     await expect.element(page.getByText('AI-2：全押')).toBeInTheDocument();
     await expect.element(page.getByText('AI-3：全押')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-hidden').elements()).toHaveLength(6);
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=2.5');
+    await expect.element(page.getByText('人类：存活')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=6 即将比牌');
+    await expect.element(page.getByTestId('all-in-reveal')).toHaveTextContent('公共牌已翻到河牌');
+    expect(page.getByTestId('community-card').elements()).toHaveLength(5);
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(6);
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+    await expect.element(page.getByTestId('all-in-shoot-result')).not.toBeInTheDocument();
   });
 
   it('人类全押后只让 AI 并行响应，不显示人类倒计时', async () => {
@@ -108,12 +129,91 @@ describe('首页', () => {
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
     await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
 
-    await expect.element(page.getByTestId('all-in-settle-placeholder')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('人类：全押')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：全押')).toBeInTheDocument();
     await expect.element(page.getByText('AI-2：全押')).toBeInTheDocument();
     await expect.element(page.getByText('AI-3：全押')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('all-in-fold-shoot-empty')).toBeInTheDocument();
+  });
+
+  it('All-in 亮牌前隐藏全押 AI，亮牌时仍隐藏弃牌 AI', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-hidden').elements()).toHaveLength(6);
+
+    random.mockReturnValue(0.999);
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect.element(page.getByTestId('all-in-reveal')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-hidden').elements()).toHaveLength(6);
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
+  });
+
+  it('All-in t=6 有死亡但仍 ≥2 存活会进下一手并清掉结果徽章', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect.element(page.getByTestId('all-in-reveal')).toBeInTheDocument();
+
+    random.mockReset();
+    random.mockReturnValueOnce(0).mockReturnValueOnce(0.999).mockReturnValueOnce(0.999);
+    random.mockReturnValue(0);
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('出局').elements()).toHaveLength(1);
+    expect(page.getByText('存活').elements()).toHaveLength(3);
+    await expect.element(page.getByTestId('all-in-shoot-result')).not.toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-fold-shoot-result')).not.toBeInTheDocument();
+  });
+
+  it('All-in 弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
+    vi.useFakeTimers();
+    // AI 全部弃牌且开枪 roll=0 → 三名 AI 死亡，人类直接胜利。
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-2：弃牌')).toBeInTheDocument();
+    await expect.element(page.getByText('AI-3：弃牌')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('win-screen')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('all-in-fold-shoot-result'))
+      .toHaveTextContent('AI-1死亡、AI-2死亡、AI-3死亡');
+    await expect.element(page.getByTestId('all-in-reveal')).not.toBeInTheDocument();
   });
 
   it('河牌后显示摊牌亮牌，输者同时开枪后出现胜利屏', async () => {

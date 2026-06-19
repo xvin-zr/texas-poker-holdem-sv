@@ -1,3 +1,4 @@
+import * as Match from 'effect/Match';
 import * as Result from 'effect/Result';
 
 export type Stage = 'preflop' | 'flop' | 'turn' | 'river';
@@ -18,6 +19,10 @@ export type EngineError = 'missing-decision-input' | 'invalid-card-count';
 export const FOLD_SHOOT_DELAY_MS = 2500;
 export const SHOWDOWN_SHOOT_DELAY_MS = 2500;
 export const ALL_IN_HUMAN_TIMEOUT_MS = 7000;
+export const ALL_IN_SETTLEMENT_CHOICE_DELAY_MS = 0;
+export const ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS = 2500;
+export const ALL_IN_SETTLEMENT_REVEAL_DELAY_MS = 1000;
+export const ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS = 2500;
 export const FOLD_SHOOT_CAP_PROBABILITY = 0.95;
 export type EngineEffect =
   | { type: 'schedule-fold-shoot'; playerId: PlayerId; timerId: string }
@@ -75,12 +80,23 @@ export type AllInWaitState = {
   timedOutIds: PlayerId[];
 };
 
+export type AllInSettlementStep = 'pending' | 'choices' | 'fold-shoot' | 'reveal';
+
+export type ShootResult = {
+  playerId: PlayerId;
+  died: boolean;
+};
+
 export type AllInSettlementState = {
+  timerId: string;
+  step: AllInSettlementStep;
   triggerPlayerId: PlayerId;
   responderIds: PlayerId[];
   allInPlayerIds: PlayerId[];
   foldedPlayerIds: PlayerId[];
   timedOutIds: PlayerId[];
+  foldShootResults: ShootResult[];
+  showdown: ShowdownState | null;
 };
 
 export type DecisionInput = {
@@ -132,6 +148,17 @@ export type GameEvent =
   | { type: 'ai-think-expired'; playerId: PlayerId; decision: Decision }
   | { type: 'all-in-timeout'; playerId: PlayerId }
   | { type: 'timer-expired'; timerId: string }
+  | { type: 'all-in-settlement-choices-expired' }
+  | {
+      type: 'all-in-settlement-fold-shoot-expired';
+      rolls: Partial<Record<PlayerId, number>>;
+    }
+  | { type: 'all-in-settlement-reveal-expired' }
+  | {
+      type: 'all-in-settlement-showdown-expired';
+      rolls: Partial<Record<PlayerId, number>>;
+      nextDeck?: Card[];
+    }
   | {
       type: 'fold-shoot-expired';
       playerId: PlayerId;
@@ -145,6 +172,16 @@ export type GameEvent =
     };
 
 export type FoldShootExpired = Extract<GameEvent, { type: 'fold-shoot-expired' }>;
+export type AllInSettlementEvent = Extract<
+  GameEvent,
+  {
+    type:
+      | 'all-in-settlement-choices-expired'
+      | 'all-in-settlement-fold-shoot-expired'
+      | 'all-in-settlement-reveal-expired'
+      | 'all-in-settlement-showdown-expired';
+  }
+>;
 
 export type EngineResult = {
   state: GameState;
@@ -329,26 +366,54 @@ export function evaluateBestHand(cards: Card[]): Result.Result<HandRank, EngineE
 }
 
 export function engine(state: GameState, event: GameEvent): EngineResult {
-  if (event.type === 'timer-expired') return { state, effects: [] };
-  if (event.type === 'start-game')
-    return { state: startGame(event.deck ?? defaultDeck), effects: [] };
-  if (event.type === 'showdown-shoot-expired')
-    return { state: applyShowdownShoot(state, event), effects: [] };
+  return Match.value(event).pipe(
+    Match.when({ type: 'timer-expired' }, () => ({ state, effects: [] })),
+    Match.when({ type: 'start-game' }, ({ deck }) => ({
+      state: startGame(deck ?? defaultDeck),
+      effects: [],
+    })),
+    Match.whenOr(
+      { type: 'all-in-settlement-choices-expired' },
+      { type: 'all-in-settlement-fold-shoot-expired' },
+      { type: 'all-in-settlement-reveal-expired' },
+      { type: 'all-in-settlement-showdown-expired' },
+      (settlementEvent) => ({
+        state: applyAllInSettlementEvent(state, settlementEvent),
+        effects: [],
+      }),
+    ),
+    Match.when({ type: 'showdown-shoot-expired' }, (shootEvent) => ({
+      state: applyShowdownShoot(state, shootEvent),
+      effects: [],
+    })),
+    Match.orElse((playingEvent) => applyPlayingEvent(state, playingEvent)),
+  );
+}
+
+function applyPlayingEvent(state: GameState, event: GameEvent): EngineResult {
   if (state.status !== 'playing') return { state, effects: [] };
   if (event.type === 'fold-shoot-expired')
     return { state: applyFoldShoot(state, event), effects: [] };
-  if (state.allInWait) {
-    if (event.type === 'all-in-timeout')
-      return { state: applyAllInTimeout(state, event.playerId), effects: [] };
-    if (event.type === 'player-action' || event.type === 'ai-think-expired')
-      return applyAllInResponse(state, event.playerId, event.decision);
+  if (state.allInWait) return applyAllInWaitEvent(state, event);
+  if (event.type !== 'player-action' && event.type !== 'ai-think-expired')
     return { state, effects: [] };
-  }
-  if (event.type === 'player-action' || event.type === 'ai-think-expired') {
-    if (event.playerId !== state.currentActorId) return { state, effects: [] };
-    return applyDecision(state, event.playerId, event.decision);
-  }
-  return { state, effects: [] };
+  if (event.playerId !== state.currentActorId) return { state, effects: [] };
+  return applyDecision(state, event.playerId, event.decision);
+}
+
+function applyAllInWaitEvent(state: GameState, event: GameEvent): EngineResult {
+  return Match.value(event).pipe(
+    Match.when({ type: 'all-in-timeout' }, ({ playerId }) => ({
+      state: applyAllInTimeout(state, playerId),
+      effects: [],
+    })),
+    Match.whenOr(
+      { type: 'player-action' },
+      { type: 'ai-think-expired' },
+      ({ playerId, decision }) => applyAllInResponse(state, playerId, decision),
+    ),
+    Match.orElse(() => ({ state, effects: [] })),
+  );
 }
 
 function startGame(deck: Card[]): GameState {
@@ -467,6 +532,8 @@ function enterAllInSettlement(state: GameState): GameState {
     pendingAllIn: false,
     allInWait: null,
     allInSettlement: {
+      timerId: wait.timerId,
+      step: 'pending',
       triggerPlayerId: wait.triggerPlayerId,
       responderIds: wait.responderIds,
       allInPlayerIds: state.players
@@ -476,6 +543,8 @@ function enterAllInSettlement(state: GameState): GameState {
         (id) => state.players.find((player) => player.id === id)?.folded,
       ),
       timedOutIds: wait.timedOutIds,
+      foldShootResults: [],
+      showdown: null,
     },
   };
 }
@@ -540,6 +609,111 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
   );
 }
 
+function applyAllInSettlementEvent(state: GameState, event: AllInSettlementEvent): GameState {
+  if (state.status !== 'all-in-settle' || !state.allInSettlement) return state;
+  return Match.value(event).pipe(
+    Match.when({ type: 'all-in-settlement-choices-expired' }, () => revealAllInChoices(state)),
+    Match.when({ type: 'all-in-settlement-fold-shoot-expired' }, ({ rolls }) =>
+      shootAllInFolders(state, rolls),
+    ),
+    Match.when({ type: 'all-in-settlement-reveal-expired' }, () => revealAllInCards(state)),
+    Match.when({ type: 'all-in-settlement-showdown-expired' }, ({ rolls, nextDeck }) =>
+      shootAllInLosers(state, rolls, nextDeck ?? defaultDeck),
+    ),
+    Match.exhaustive,
+  );
+}
+
+function revealAllInChoices(state: GameState): GameState {
+  const settlement = state.allInSettlement;
+  if (!settlement || settlement.step !== 'pending') return state;
+  const won = winIfOnlyOneAlive(state);
+  if (won) return won;
+  return { ...state, allInSettlement: { ...settlement, step: 'choices' } };
+}
+
+function shootAllInFolders(state: GameState, rolls: Partial<Record<PlayerId, number>>): GameState {
+  const settlement = state.allInSettlement;
+  if (!settlement || settlement.step !== 'choices') return state;
+  const won = winIfOnlyOneAlive(state);
+  if (won) return won;
+
+  const folded = new Set(settlement.foldedPlayerIds);
+  const results: ShootResult[] = [];
+  const players = state.players.map((player) => {
+    if (!folded.has(player.id) || !player.alive) return player;
+    const died = (rolls[player.id] ?? 1) < foldShootDeathProbability(player.betThisHand);
+    results.push({ playerId: player.id, died });
+    return died ? { ...player, alive: false } : player;
+  });
+  const next: GameState = {
+    ...state,
+    players,
+    allInSettlement: { ...settlement, step: 'fold-shoot', foldShootResults: results },
+  };
+  return winIfOnlyOneAlive(next) ?? next;
+}
+
+function revealAllInCards(state: GameState): GameState {
+  const settlement = state.allInSettlement;
+  if (!settlement || settlement.step !== 'fold-shoot') return state;
+  const won = winIfOnlyOneAlive(state);
+  if (won) return won;
+
+  const revealed = revealCommunityToRiver(state);
+  return {
+    ...revealed,
+    allInSettlement: {
+      ...settlement,
+      step: 'reveal',
+      showdown: buildAllInShowdown(revealed, settlement.allInPlayerIds),
+    },
+  };
+}
+
+function shootAllInLosers(
+  state: GameState,
+  rolls: Partial<Record<PlayerId, number>>,
+  nextDeck: Card[],
+): GameState {
+  const settlement = state.allInSettlement;
+  if (!settlement || settlement.step !== 'reveal') return state;
+  const won = winIfOnlyOneAlive(state);
+  if (won) return won;
+
+  const showdown = settlement.showdown ?? buildAllInShowdown(state, settlement.allInPlayerIds);
+  const losers = new Set(showdown.loserIds);
+  const players = state.players.map((player) => {
+    if (!losers.has(player.id)) return player;
+    const died = (rolls[player.id] ?? 1) < foldShootDeathProbability(player.betThisHand);
+    return died ? { ...player, alive: false } : player;
+  });
+  const settled: GameState = {
+    ...state,
+    players,
+    allInSettlement: { ...settlement, showdown },
+  };
+  const final = winIfOnlyOneAlive(settled);
+  if (final) return final;
+  return dealNextHand({ ...settled, allInSettlement: null, showdown: null }, nextDeck);
+}
+
+function winIfOnlyOneAlive(state: GameState): GameState | null {
+  const survivors = state.players.filter((player) => player.alive);
+  if (survivors.length > 1) return null;
+  return {
+    ...state,
+    status: 'won',
+    currentActorId: null,
+    pendingAllIn: false,
+    allInWait: null,
+    allInSettlement: null,
+    pendingFoldShoot: null,
+    showdown: null,
+    winnerId: survivors[0]?.id ?? null,
+  };
+}
+
 function withShowdownEffect(state: GameState): EngineResult {
   return {
     state,
@@ -594,12 +768,7 @@ function advance(state: GameState): GameState {
 }
 
 function enterShowdown(state: GameState): GameState {
-  const missingCommunity = Math.max(0, 5 - state.communityCards.length);
-  const revealed = {
-    ...state,
-    communityCards: [...state.communityCards, ...state.deck.slice(0, missingCommunity)],
-    deck: state.deck.slice(missingCommunity),
-  };
+  const revealed = revealCommunityToRiver(state);
   return {
     ...revealed,
     status: 'showdown',
@@ -608,8 +777,29 @@ function enterShowdown(state: GameState): GameState {
   };
 }
 
+function revealCommunityToRiver(state: GameState): GameState {
+  const missingCommunity = Math.max(0, 5 - state.communityCards.length);
+  return {
+    ...state,
+    communityCards: [...state.communityCards, ...state.deck.slice(0, missingCommunity)],
+    deck: state.deck.slice(missingCommunity),
+  };
+}
+
 function buildShowdown(state: GameState): ShowdownState {
-  const ranked = activePlayers(state)
+  return buildShowdownForPlayers(state, activePlayers(state));
+}
+
+function buildAllInShowdown(state: GameState, playerIds: PlayerId[]): ShowdownState {
+  const allowed = new Set(playerIds);
+  return buildShowdownForPlayers(
+    state,
+    state.players.filter((player) => allowed.has(player.id) && player.alive && !player.folded),
+  );
+}
+
+function buildShowdownForPlayers(state: GameState, players: Player[]): ShowdownState {
+  const ranked = players
     .map((player) => {
       const result = evaluateBestHand([...player.holeCards, ...state.communityCards]);
       return Result.isSuccess(result) ? { playerId: player.id, hand: result.success } : null;
@@ -622,7 +812,10 @@ function buildShowdown(state: GameState): ShowdownState {
   const allTied = best ? ranked.every((entry) => compareHands(entry.hand, best) === 0) : true;
   const entries = ranked.map((entry): ShowdownEntry => {
     const isBest = best ? compareHands(entry.hand, best) === 0 : true;
-    return { ...entry, result: allTied ? 'tie' : isBest ? 'winner' : 'loser' };
+    return {
+      ...entry,
+      result: ranked.length === 1 || !allTied ? (isBest ? 'winner' : 'loser') : 'tie',
+    };
   });
   return {
     entries,
