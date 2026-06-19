@@ -1,3 +1,4 @@
+import type { DecisionInput } from '$lib/engine';
 import * as S from 'effect/Schema';
 
 const ActionSchema = S.Literals(['call', 'fold', 'all-in']);
@@ -40,3 +41,31 @@ const AiDecisionReqEffectSchema = S.Struct({
 });
 
 export const AiDecisionReqSchema = S.toStandardSchemaV1(AiDecisionReqEffectSchema);
+
+type PromptPlayer = { readonly personality?: unknown; readonly [key: string]: unknown };
+
+export function visibleGameMessage(input: {
+  readonly stage: DecisionInput['stage'];
+  readonly myBetThisHand: number;
+  readonly myHoleCards: unknown;
+  readonly communityCards: unknown;
+  readonly alivePlayers: ReadonlyArray<PromptPlayer>;
+  readonly activePlayers: ReadonlyArray<PromptPlayer>;
+  readonly actionHistory: unknown;
+  readonly pendingAllIn: boolean;
+}) {
+  return JSON.stringify({
+    stage: input.stage,
+    myBetThisHand: input.myBetThisHand,
+    myHoleCards: input.myHoleCards,
+    communityCards: input.communityCards,
+    alivePlayers: hidePlayerPersonalities(input.alivePlayers),
+    activePlayers: hidePlayerPersonalities(input.activePlayers),
+    actionHistory: input.actionHistory,
+    pendingAllIn: input.pendingAllIn,
+  });
+}
+
+function hidePlayerPersonalities(players: ReadonlyArray<PromptPlayer>) {
+  return players.map(({ personality: _personality, ...player }) => player);
+}

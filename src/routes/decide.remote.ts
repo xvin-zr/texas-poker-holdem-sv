@@ -4,7 +4,7 @@ import { makeOpenrouterAdapter } from '$lib/server/ai/model';
 import { chat } from '@tanstack/ai';
 import * as S from 'effect/Schema';
 
-import { AiDecisionReqSchema } from './ai-decision-schema';
+import { AiDecisionReqSchema, visibleGameMessage } from './ai-decision-schema';
 
 /** 客户端 → 远程函数输入（来自 PRD 原型） */
 export type AiDecisionRequest = {
@@ -41,24 +41,3 @@ function personalityPrompt(personality: Personality) {
   return `${style[personality]} 你正在玩德州扑克俄轮版。只返回 JSON，不要解释。`;
 }
 
-function visibleGameMessage(input: {
-  stage: DecisionInput['stage'];
-  myBetThisHand: number;
-  myHoleCards: unknown;
-  communityCards: unknown;
-  alivePlayers: unknown;
-  activePlayers: unknown;
-  actionHistory: unknown;
-  pendingAllIn: boolean;
-}) {
-  return JSON.stringify({
-    stage: input.stage,
-    myBetThisHand: input.myBetThisHand,
-    myHoleCards: input.myHoleCards,
-    communityCards: input.communityCards,
-    alivePlayers: input.alivePlayers,
-    activePlayers: input.activePlayers,
-    actionHistory: input.actionHistory,
-    pendingAllIn: input.pendingAllIn,
-  });
-}

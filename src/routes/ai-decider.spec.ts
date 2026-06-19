@@ -3,7 +3,7 @@ import * as Result from 'effect/Result';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createOpenRouterAiDecider, OPENROUTER_DECISION_TIMEOUT_MS } from './ai-decider';
-import { AiDecisionReqSchema } from './ai-decision-schema';
+import { AiDecisionReqSchema, visibleGameMessage } from './ai-decision-schema';
 
 const startedGame = () => engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
 const aiInput = () => {
@@ -16,6 +16,15 @@ describe('OpenRouter AI 决策适配器', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('发给 LLM 的可见信息不会包含任何玩家性格', () => {
+    const message = visibleGameMessage(aiInput());
+
+    expect(message).not.toContain('conservative');
+    expect(message).not.toContain('balanced');
+    expect(message).not.toContain('aggressive');
+    expect(JSON.parse(message).alivePlayers[0]).not.toHaveProperty('personality');
   });
 
   it('远程请求 schema 接受人类玩家没有性格', async () => {
