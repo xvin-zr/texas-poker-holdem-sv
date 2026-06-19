@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "node_modules",
+    ".git",
+    ".jj",
+    ".svelte-kit",
+    ".output",
+    "build",
+    ".wrangler",
+    ".vercel",
+    ".netlify",
+    "vite.config.*.timestamp-*",
+    "worker-configuration.d.ts",
+    "bun.lock"
+  ],
+  "singleQuote": true,
+  "sortImports": true,
+  "useTabs": false,
+  "tabWidth": 2,
+  "sortTailwindcss": true,
+  "svelte": true
+}
