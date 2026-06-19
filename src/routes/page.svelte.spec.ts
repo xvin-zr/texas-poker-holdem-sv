@@ -4,6 +4,10 @@ import { page } from 'vitest/browser';
 
 import Page from './+page.svelte';
 
+const flushTimers = async () => {
+  for (let count = 0; count < 20; count += 1) await vi.advanceTimersByTimeAsync(1);
+};
+
 describe('首页', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -43,7 +47,7 @@ describe('首页', () => {
     await expect.element(page.getByText('人类 在 翻牌前 选择 跟注')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
 
-    await vi.advanceTimersByTimeAsync(9000);
+    await flushTimers();
 
     await expect.element(page.getByText('当前阶段：翻牌')).toBeInTheDocument();
     await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
@@ -59,7 +63,7 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 3; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
 
     await expect.element(page.getByText('当前阶段：河牌')).toBeInTheDocument();
@@ -74,7 +78,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '跟注' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时');
@@ -86,7 +90,7 @@ describe('首页', () => {
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
     await vi.advanceTimersByTimeAsync(7000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=0 展示选择');
@@ -134,8 +138,7 @@ describe('首页', () => {
     await expect.element(page.getByTestId('all-in-response-fold')).not.toBeInTheDocument();
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('人类：全押')).toBeInTheDocument();
@@ -155,8 +158,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(3000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
@@ -178,8 +180,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
     await vi.advanceTimersByTimeAsync(2500);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -211,7 +212,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '跟注' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
+    await flushTimers();
 
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await page.getByTestId('all-in-response-fold').click();
@@ -230,8 +231,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(3000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
@@ -256,9 +256,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
     expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(6);
@@ -331,9 +331,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
 
@@ -360,9 +360,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
 

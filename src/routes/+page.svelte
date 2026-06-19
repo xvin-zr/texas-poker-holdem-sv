@@ -28,7 +28,6 @@
     FOLD_SHOOT_DELAY_MS,
     SHOWDOWN_SHOOT_DELAY_MS,
     initialState,
-    randomThinkDelayMs,
     shuffleDeck,
     type Card as PlayingCard,
     type Decision,
@@ -134,7 +133,7 @@
           decision: decision.success,
         }).state;
       }
-    }, randomThinkDelayMs());
+    }, 0);
     return () => {
       cancelled = true;
       clearTimeout(timeout);
@@ -168,7 +167,7 @@
               decision: decision.success,
             }).state;
           }
-        }, randomThinkDelayMs());
+        }, 0);
         return {
           timeout,
           cancel: () => {

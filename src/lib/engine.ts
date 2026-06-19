@@ -312,6 +312,13 @@ export function createDecisionInput(
   });
 }
 
+export function deriveLegalActions(input: DecisionInput): Decision['action'][] {
+  const actions: Decision['action'][] = input.pendingAllIn
+    ? ['all-in', 'fold']
+    : ['call', 'fold', 'all-in'];
+  return input.stage === 'river' ? actions.filter((action) => action !== 'all-in') : actions;
+}
+
 export async function decideForAi(
   decider: AiDecider,
   state: GameState,
@@ -320,8 +327,11 @@ export async function decideForAi(
   const input = createDecisionInput(state, playerId);
   if (Result.isFailure(input)) return Result.succeed({ action: 'fold' });
 
+  const legalActions = deriveLegalActions(input.success);
   try {
-    return Result.succeed(await decider.decide(input.success));
+    const decision = await decider.decide(input.success);
+    if (!legalActions.includes(decision.action)) return Result.succeed({ action: 'fold' });
+    return Result.succeed(decision);
   } catch {
     return Result.succeed({ action: 'fold' });
   }
@@ -364,10 +374,6 @@ export function weightedAiDecision(
     if (roll < 0) return { action };
   }
   return { action: entries[entries.length - 1]?.[0] ?? 'fold' };
-}
-
-export function randomThinkDelayMs(random = Math.random) {
-  return 3000 + Math.floor(random() * 2001);
 }
 
 export function compareHands(left: HandRank, right: HandRank) {

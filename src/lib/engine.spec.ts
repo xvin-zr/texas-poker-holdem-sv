@@ -5,18 +5,19 @@ import {
   compareHands,
   createDecisionInput,
   decideForAi,
+  deriveLegalActions,
   defaultDeck,
   engine,
   evaluateBestHand,
   foldShootDeathProbability,
   initialState,
-  randomThinkDelayMs,
   shuffleDeck,
   weightedAiDecision,
   type AiDecider,
   type AiPlayerId,
   type Card,
   type Decision,
+  type DecisionInput,
   type GameState,
   type HandRank,
   type Personality,
@@ -929,6 +930,89 @@ describe('牌型评估', () => {
   });
 });
 
+describe('AI 合法动作', () => {
+  it('派生合法动作与加权决策剔除逻辑等价', () => {
+    const baseInput = (overrides: Partial<DecisionInput> = {}): DecisionInput => ({
+      stage: 'preflop',
+      myBetThisHand: 1,
+      myHoleCards: [c('A', '♠'), c('K', '♠')],
+      communityCards: [],
+      alivePlayers: [],
+      activePlayers: [],
+      actionHistory: [],
+      pendingAllIn: false,
+      ...overrides,
+    });
+
+    expect(deriveLegalActions(baseInput())).toEqual(['call', 'fold', 'all-in']);
+    expect(deriveLegalActions(baseInput({ stage: 'river' }))).toEqual(['call', 'fold']);
+    expect(deriveLegalActions(baseInput({ pendingAllIn: true }))).toEqual(['all-in', 'fold']);
+    expect(deriveLegalActions(baseInput({ stage: 'river', pendingAllIn: true }))).toEqual(['fold']);
+  });
+
+  it('AI 决策透传合法动作并回退非法与异常', async () => {
+    const started = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'call' }) }, started, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'call' } });
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'all-in' }) }, started, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'all-in' } });
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'fold' }) }, started, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+
+    await expect(
+      decideForAi({ decide: () => Promise.reject(new Error('AI 故障')) }, started, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+
+    await expect(
+      decideForAi(
+        { decide: async () => ({ action: 'invalid-action' as Decision['action'] }) },
+        started,
+        'ai-1',
+      ),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+  });
+
+  it('河牌阶段返回全押时回退为弃牌', async () => {
+    const started = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+    const river = { ...started, stage: 'river' as const, currentActorId: 'ai-1' as const };
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'all-in' }) }, river, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'call' }) }, river, 'ai-1'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'call' } });
+  });
+
+  it('待全押响应阶段只接受全押或弃牌，跟注回退为弃牌', async () => {
+    const started = engine(initialState, { type: 'start-game', deck: defaultDeck }).state;
+    const waiting = {
+      ...started,
+      pendingAllIn: true,
+      currentActorId: 'ai-2' as const,
+    };
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'call' }) }, waiting, 'ai-2'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'all-in' }) }, waiting, 'ai-2'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'all-in' } });
+
+    await expect(
+      decideForAi({ decide: async () => ({ action: 'fold' }) }, waiting, 'ai-2'),
+    ).resolves.toMatchObject({ _tag: 'Success', success: { action: 'fold' } });
+  });
+});
+
 describe('AI 权重', () => {
   it('按性格权重抽取动作，河牌与合法动作集合会剔除全押', () => {
     expect(weightedAiDecision('conservative', 'preflop', () => 0.1)).toEqual({ action: 'call' });
@@ -938,11 +1022,6 @@ describe('AI 权重', () => {
     expect(weightedAiDecision('aggressive', 'preflop', () => 0.99, ['call', 'fold'])).toEqual({
       action: 'fold',
     });
-  });
-
-  it('AI 思考延时落在 3 到 5 秒', () => {
-    expect(randomThinkDelayMs(() => 0)).toBe(3000);
-    expect(randomThinkDelayMs(() => 0.9999)).toBe(5000);
   });
 });
 
