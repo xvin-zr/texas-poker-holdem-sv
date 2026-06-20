@@ -580,7 +580,7 @@
                 </div>
                 {#if revealedOthers.length > 0}
                   <div>
-                    <p class="text-sm font-medium">已撞牌玩家底牌</p>
+                    <p class="text-sm font-medium">已摊牌玩家底牌</p>
                     <div class="space-y-2 pt-1">
                       {#each revealedOthers as player (player.id)}
                         <div class="flex items-center gap-2">
