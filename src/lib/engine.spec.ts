@@ -474,7 +474,7 @@ describe('All-in 结算时间轴', () => {
     expect(showdownIgnored).toEqual(state);
   });
 
-  it('t=2.5 仅 AI 弃牌开枪致死且仍有多人存活时保持 hand-resolved 契约', () => {
+  it('t=2.5 AI 弃牌开枪死亡且仍有多人存活 → 结算时间轴继续推进', () => {
     let state = allInWithFoldedResponders();
     state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
 
@@ -483,14 +483,73 @@ describe('All-in 结算时间轴', () => {
       rolls: { human: 0.999, 'ai-2': 0 },
     }).state;
 
-    expect(state.status).toBe('hand-resolved');
+    expect(state.status).toBe('all-in-settle');
+    expect(state.allInSettlement?.step).toBe('fold-shoot');
+    expect(state.handResolution).toBe(null);
     expect(state.players.find((player) => player.id === 'human')?.alive).toBe(true);
     expect(state.players.find((player) => player.id === 'ai-2')?.alive).toBe(false);
     expect(state.players.filter((player) => player.alive)).toHaveLength(3);
-    expect(state.handResolution).toEqual({ kind: 'void', voidPlayerId: 'ai-2' });
     expect(state.allInSettlement?.foldShootResults).toEqual([
       { playerId: 'human', died: false },
       { playerId: 'ai-2', died: true },
+    ]);
+
+    // 后续 reveal/showdown-expired 仍可正常推进
+    state = engine(state, { type: 'all-in-settlement-reveal-expired' }).state;
+    expect(state.allInSettlement?.step).toBe('reveal');
+    expect(state.communityCards).toHaveLength(5);
+    expect(state.allInSettlement?.showdown?.entries.map((entry) => entry.playerId)).toEqual([
+      'ai-1',
+      'ai-3',
+    ]);
+  });
+
+  it('t=2.5 AI 弃牌开枪死亡后仅剩 1 名存活 → 触发整局胜利', () => {
+    let state = engine(initialState, { type: 'start-game' }).state;
+    state = engine(state, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'all-in' },
+    }).state;
+    state = engine(state, {
+      type: 'ai-think-expired',
+      playerId: 'ai-1',
+      decision: { action: 'all-in' },
+    }).state;
+    state = engine(state, {
+      type: 'ai-think-expired',
+      playerId: 'ai-2',
+      decision: { action: 'fold' },
+    }).state;
+    state = engine(state, {
+      type: 'ai-think-expired',
+      playerId: 'ai-3',
+      decision: { action: 'fold' },
+    }).state;
+
+    // 进入结算前把 ai-1 置为死亡，使结算前存活者为 human/ai-2/ai-3
+    state = {
+      ...state,
+      players: state.players.map((player) =>
+        player.id === 'ai-1' ? { ...player, alive: false } : player,
+      ),
+    };
+
+    state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+    expect(state.status).toBe('all-in-settle');
+    expect(state.allInSettlement?.step).toBe('choices');
+
+    state = engine(state, {
+      type: 'all-in-settlement-fold-shoot-expired',
+      rolls: { 'ai-2': 0, 'ai-3': 0 },
+    }).state;
+
+    expect(state.status).toBe('won');
+    expect(state.winnerId).toBe('human');
+    expect(state.players.filter((player) => player.alive)).toHaveLength(1);
+    expect(state.allInSettlement?.foldShootResults).toEqual([
+      { playerId: 'ai-2', died: true },
+      { playerId: 'ai-3', died: true },
     ]);
   });
 
@@ -695,43 +754,59 @@ describe('弃牌开枪', () => {
     expect(survived.players.filter((player) => player.alive)).toHaveLength(2);
   });
 
-  it('AI 死亡且 ≥2 存活 → 本手作废、洗牌进下一手，死者移除且下注不退还', () => {
+  it('AI 弃牌开枪死亡且仍有多人存活 → 本手继续，死者被自然跳过', () => {
     const started = engine(initialState, { type: 'start-game' }).state;
-    // 人类多跟注几次抬高水位，保证开枪致死。
     let state = act(started, 'human');
-    state = act(state, 'ai-1');
-    state = act(state, 'ai-2');
-    state = act(state, 'ai-3');
-    // flop：人类再跟注到 betThisHand=3，仍 <8，用 roll=0 强制致死
-    state = act(state, 'human');
 
     const folded = engine(state, {
       type: 'player-action',
       playerId: 'ai-1',
       decision: { action: 'fold' },
     }).state;
-    const voided = engine(folded, {
+    const continued = engine(folded, {
       type: 'fold-shoot-expired',
       playerId: 'ai-1',
       roll: 0,
     }).state;
 
-    expect(voided.status).toBe('hand-resolved');
-    expect(voided.handResolution).toEqual({ kind: 'void', voidPlayerId: 'ai-1' });
-    expect(voided.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    expect(continued.status).toBe('playing');
+    expect(continued.handResolution).toBe(null);
+    expect(continued.players.find((player) => player.id === 'ai-1')).toMatchObject({
+      alive: false,
+      folded: true,
+    });
+    expect(continued.players.filter((player) => player.alive)).toHaveLength(3);
+    // 行动轮从弃牌者位置继续，下一活跃玩家为 ai-2
+    expect(continued.currentActorId).toBe('ai-2');
+  });
 
-    const nextDeck = shuffleDeck(defaultDeck, () => 0);
-    const next = engine(voided, { type: 'next-hand', deck: nextDeck }).state;
-    expect(next.status).toBe('playing');
-    expect(next.stage).toBe('preflop');
-    // 其他人下注不退还：新一手 ante 重置为 1（本手下注不退还体现为本手作废重开）
-    expect(
-      next.players.filter((player) => player.alive).every((player) => player.betThisHand === 1),
-    ).toBe(true);
-    expect(next.players.filter((player) => player.alive)).toHaveLength(3);
-    expect(next.actionHistory).toEqual([]);
-    expect(next.currentActorId).toBe('human');
-    expect(next.handResolution).toBe(null);
+  it('AI 弃牌开枪死亡后仅剩 1 名活跃且 ≥2 存活 → 该活跃玩家本手自动获胜', () => {
+    const started = engine(initialState, { type: 'start-game' }).state;
+    const state = {
+      ...started,
+      players: started.players.map((player) => {
+        if (player.id === 'ai-3') return { ...player, alive: false };
+        if (player.id === 'ai-2') return { ...player, folded: true };
+        return player;
+      }),
+    } as GameState;
+
+    const afterHuman = act(state, 'human');
+    const folded = engine(afterHuman, {
+      type: 'player-action',
+      playerId: 'ai-1',
+      decision: { action: 'fold' },
+    }).state;
+    const resolved = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'ai-1',
+      roll: 0,
+    }).state;
+
+    expect(resolved.status).toBe('hand-resolved');
+    expect(resolved.handResolution).toEqual({ kind: 'fold-win', handWinnerId: 'human' });
+    expect(resolved.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    expect(resolved.players.filter((player) => player.alive)).toHaveLength(2);
   });
 
   it('人类弃牌开枪死亡会提前结束整局且忽略 next-hand', () => {
@@ -771,7 +846,7 @@ describe('弃牌开枪', () => {
     expect(reset.players.every((player) => player.alive)).toBe(true);
   });
 
-  it('死亡且仅剩 1 存活 → 触发胜利判定（占位）', () => {
+  it('AI 弃牌开枪死亡后仅剩 1 名存活 → 触发整局胜利', () => {
     const started = engine(initialState, { type: 'start-game' }).state;
     const onlyTwo = {
       ...started,
@@ -796,8 +871,7 @@ describe('弃牌开枪', () => {
     expect(won.status).toBe('won');
     expect(won.winnerId).toBe('human');
     expect(won.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
-    // 优先级锁定：仅剩 1 名存活时走整局胜利，不误判为 fold-win 本手获胜。
-    expect(won.handResolution).toEqual({ kind: 'void', voidPlayerId: 'ai-1' });
+    expect(won.handResolution).toBe(null);
   });
 
   it('死亡概率 = betThisHand ÷ 8，≥8 封顶 95%', () => {
@@ -854,10 +928,10 @@ describe('弃牌开枪', () => {
     expect(survived.players.find((player) => player.id === 'human')?.holeCards).toEqual(humanHole);
   });
 
-  it('死亡玩家从整局移除，后续手行动顺序跳过死者', () => {
+  it('AI 弃牌开枪死亡后继续本手，后续手行动顺序跳过死者', () => {
     const started = engine(initialState, { type: 'start-game' }).state;
     let state = act(started, 'human');
-    // ai-1 弃牌致死（roll=0），其余 3 存活 → 本手作废进下一手
+    // ai-1 弃牌致死（roll=0），其余 3 存活 → 本手继续
     const folded = engine(state, {
       type: 'player-action',
       playerId: 'ai-1',
@@ -868,7 +942,17 @@ describe('弃牌开枪', () => {
       playerId: 'ai-1',
       roll: 0,
     }).state;
+
+    expect(state.status).toBe('playing');
+    expect(state.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+
+    // 让 ai-2/ai-3 弃牌存活，人类获得 fold-win 后进入下一手
+    state = foldSurvive(state, 'ai-2');
+    state = foldSurvive(state, 'ai-3');
+
     expect(state.status).toBe('hand-resolved');
+    expect(state.handResolution).toEqual({ kind: 'fold-win', handWinnerId: 'human' });
+
     state = engine(state, {
       type: 'next-hand',
       deck: shuffleDeck(defaultDeck, () => 0),

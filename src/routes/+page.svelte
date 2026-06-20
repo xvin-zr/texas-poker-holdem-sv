@@ -87,12 +87,16 @@
   const canHumanAllIn = $derived(canHumanAct && game.stage !== 'river');
   const humanAllInPending = $derived(isAllInResponderPending('human'));
   const humanPlayer = $derived(game.players.find((player) => player.isHuman));
+  // 死亡弹窗用：死亡快照中已撞牌的他人（存活未弃牌 AI 在撞牌/全押亮牌时翻开）。
+  const revealedOthers = $derived(
+    game.players.filter((player) => !player.isHuman && shouldRevealHoleCards(player)),
+  );
   const lastShootLabel = $derived.by(() => {
     const shoot = lastShoot;
     if (!shoot) return null;
     const name = game.players.find((player) => player.id === shoot.playerId)?.name ?? '';
     const outcome = shoot.died ? '死亡' : '存活';
-    const suffix = shoot.died && game.status === 'hand-resolved' ? '·本手作废' : '';
+    const suffix = shoot.died && game.handResolution?.kind === 'void' ? '·本手作废' : '';
     return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
   });
   const lastShowdownLabel = $derived.by(() => {
@@ -543,6 +547,58 @@
                   {lastShootLabel.text}
                 </Badge>
               {/if}
+              <div class="space-y-3 pt-2">
+                <div>
+                  <p class="text-sm font-medium">公共牌</p>
+                  <div class="flex flex-wrap gap-2 pt-1">
+                    {#if game.communityCards.length === 0}
+                      <p class="text-muted-foreground text-sm">尚无公共牌</p>
+                    {:else}
+                      {#each game.communityCards as card (card.rank + card.suit)}
+                        <span
+                          class="bg-background rounded-lg border px-3 py-2 font-mono"
+                          data-testid="dead-community-card"
+                        >
+                          {cardText(card)}
+                        </span>
+                      {/each}
+                    {/if}
+                  </div>
+                </div>
+                <div>
+                  <p class="text-sm font-medium">你的底牌</p>
+                  <div class="flex gap-2 pt-1">
+                    {#each humanPlayer?.holeCards ?? [] as card (card.rank + card.suit)}
+                      <span
+                        class="bg-background rounded-lg border px-3 py-2 font-mono"
+                        data-testid="dead-human-hole-card"
+                      >
+                        {cardText(card)}
+                      </span>
+                    {/each}
+                  </div>
+                </div>
+                {#if revealedOthers.length > 0}
+                  <div>
+                    <p class="text-sm font-medium">已摊牌玩家底牌</p>
+                    <div class="space-y-2 pt-1">
+                      {#each revealedOthers as player (player.id)}
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm">{player.name}</span>
+                          {#each player.holeCards as card (card.rank + card.suit)}
+                            <span
+                              class="bg-background rounded-lg border px-3 py-2 font-mono"
+                              data-testid="dead-revealed-hole-card"
+                            >
+                              {cardText(card)}
+                            </span>
+                          {/each}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <Button onclick={startGame}>下一局</Button>

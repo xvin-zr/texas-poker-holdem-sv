@@ -622,30 +622,20 @@ function applyFold(state: GameState, playerId: PlayerId): EngineResult {
   return { state: next, effects: [{ type: 'schedule-fold-shoot', playerId, timerId }] };
 }
 
-// 弃牌开枪到期：按 betThisHand 水位判生死，致死作废本手 / 胜利，存活退出本手继续。
+// 弃牌开枪到期：按 betThisHand 水位判生死。
+// 人类致死 → 整局结束（ADR-0007），保留 void 透传死因到死亡弹窗。
+// AI 致死或任何存活 → 不结束本手：标记状态后从弃牌者位置继续扫描下一活跃玩家，
+// 死者 alive=false 被 activePlayers 自然跳过，本手照常推进到 fold-win / won / 下一行动者。
 function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
   if (state.pendingFoldShoot !== event.playerId) return state;
   const player = state.players.find((candidate) => candidate.id === event.playerId);
   if (!player) return state;
 
   const died = event.roll < foldShootDeathProbability(player.betThisHand);
-  if (!died) {
-    // 存活：从弃牌者位置继续扫描下一活跃玩家，避免依赖 currentActorId=null 的隐式行为。
-    const surviving: GameState = {
-      ...state,
-      pendingFoldShoot: null,
-      currentActorId: event.playerId,
-    };
-    // 弃牌存活后若仅剩 1 名活跃玩家且无人阵亡 → 该玩家本手自动获胜，暂停等待下一手。
-    const handWon = resolveIfOnlyOneActive(surviving);
-    if (handWon) return handWon;
-    return advance(surviving);
-  }
-
-  const players = state.players.map((candidate) =>
-    candidate.id === event.playerId ? { ...candidate, alive: false } : candidate,
-  );
-  if (player.isHuman) {
+  if (died && player.isHuman) {
+    const players = state.players.map((candidate) =>
+      candidate.id === event.playerId ? { ...candidate, alive: false } : candidate,
+    );
     return {
       ...state,
       players,
@@ -656,28 +646,23 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
     };
   }
 
-  const survivors = players.filter((candidate) => candidate.alive);
-  if (survivors.length <= 1) {
-    return {
-      ...state,
-      players,
-      status: 'won',
-      winnerId: survivors[0]?.id ?? null,
-      currentActorId: null,
-      pendingFoldShoot: null,
-      handResolution: { kind: 'void', voidPlayerId: event.playerId },
-    };
-  }
-
-  // 致死且 ≥2 存活：本手作废，暂停进入 hand-resolved，等待玩家点「开始下一手」再洗牌。
-  return {
+  // 存活或 AI 致死：从弃牌者位置继续扫描下一活跃玩家，避免依赖 currentActorId=null 的隐式行为。
+  const players = state.players.map((candidate) =>
+    candidate.id === event.playerId ? { ...candidate, alive: !died } : candidate,
+  );
+  const surviving: GameState = {
     ...state,
     players,
-    status: 'hand-resolved',
-    currentActorId: null,
     pendingFoldShoot: null,
-    handResolution: { kind: 'void', voidPlayerId: event.playerId },
+    currentActorId: event.playerId,
   };
+  // 仅剩 1 名活跃玩家且 ≥2 存活 → 该玩家本手自动获胜（fold-win），暂停等待下一手。
+  const handWon = resolveIfOnlyOneActive(surviving);
+  if (handWon) return handWon;
+  // 仅剩 1 名存活 → 整局胜利。
+  const won = winIfOnlyOneAlive(surviving);
+  if (won) return won;
+  return advance(surviving);
 }
 
 function applyAllInSettlementEvent(state: GameState, event: AllInSettlementEvent): GameState {
@@ -732,15 +717,8 @@ function shootAllInFolders(state: GameState, rolls: Partial<Record<PlayerId, num
   }
   const final = winIfOnlyOneAlive(next);
   if (final) return final;
-  const died = results.find((result) => result.died);
-  if (died) {
-    return {
-      ...next,
-      status: 'hand-resolved',
-      currentActorId: null,
-      handResolution: { kind: 'void', voidPlayerId: died.playerId },
-    };
-  }
+  // AI 弃牌开枪死亡不中止本手：死者 folded+alive=false 不参与后续比牌，
+  // 时间轴继续推进到 reveal→t=6 比牌。
   return next;
 }
 
