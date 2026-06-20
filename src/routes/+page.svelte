@@ -478,7 +478,7 @@
 <main class="bg-muted/40 text-foreground min-h-screen p-6">
   <section class="mx-auto flex max-w-5xl flex-col gap-6">
     <div class="space-y-2">
-      <p class="text-muted-foreground text-sm">德扑与俄式轮盘的桌面游戏</p>
+      <p class="text-muted-foreground text-sm">德扑与俄式轮盘的桌面游戏（仅供娱乐，du 🐶 biss）</p>
       <h1 class="text-3xl font-semibold tracking-tight">德州扑克俄轮版</h1>
     </div>
 
