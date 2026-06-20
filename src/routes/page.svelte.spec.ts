@@ -471,6 +471,10 @@ describe('首页', () => {
     await expect
       .element(page.getByTestId('human-dead-shoot-result'))
       .toHaveTextContent('人类开枪：死亡');
+    // 翻牌前死亡弹窗展示「尚无公共牌」、人类自己的 2 张底牌，且不出示任何 AI 底牌
+    await expect.element(page.getByTestId('human-dead-dialog').getByText('尚无公共牌')).toBeInTheDocument();
+    expect(page.getByTestId('dead-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('dead-revealed-hole-card').elements()).toHaveLength(0);
     await expect.element(page.getByRole('button', { name: '下一局' })).toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(5000);
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
@@ -483,6 +487,31 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
     expect(page.getByText('本手下注：1 颗子弹').elements()).toHaveLength(4);
     expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('AI 弃牌开枪死亡不暂停本手，结果徽章不含「本手作废」后缀', async () => {
+    vi.useFakeTimers();
+    // AI-1 行动时弃牌，roll=0 致死；人类跟注后 AI-1 弃牌，其余 AI 延迟决策以观察推进状态。
+    mockAiActions([
+      { action: 'fold', delayMs: 0 },
+      { action: 'call', delayMs: 10000 },
+      { action: 'call', delayMs: 10000 },
+    ]);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    await expect.element(page.getByTestId('fold-shoot-pending')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByTestId('fold-shoot-result')).toHaveTextContent('AI-1开枪：死亡');
+    await expect.element(page.getByTestId('fold-shoot-result')).not.toHaveTextContent('本手作废');
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+    await expect.element(page.getByText('当前行动者：AI-2')).toBeInTheDocument();
   });
 
   it('人类在摊牌输者开枪中死亡会停在死亡弹窗并可开下一局', async () => {
@@ -505,6 +534,10 @@ describe('首页', () => {
     await expect
       .element(page.getByTestId('human-dead-dialog').getByTestId('showdown-shoot-result'))
       .toHaveTextContent(/输者开枪：.*人类死亡/);
+    // 摊牌阶段死亡弹窗展示 5 张公共牌、人类底牌与已摊牌的 3 家 AI 底牌
+    expect(page.getByTestId('dead-community-card').elements()).toHaveLength(5);
+    expect(page.getByTestId('dead-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('dead-revealed-hole-card').elements()).toHaveLength(6);
     await vi.advanceTimersByTimeAsync(5000);
     await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
 
