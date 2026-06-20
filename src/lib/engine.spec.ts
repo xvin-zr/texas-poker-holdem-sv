@@ -588,7 +588,7 @@ describe('弃牌开枪', () => {
     expect(survived.currentActorId).toBe('ai-1');
   });
 
-  it('存活退出时场上只剩 1 名活跃玩家也不直接判胜，而是继续行动轮', () => {
+  it('存活退出后场上只剩 1 名活跃玩家不判整局胜利，但该玩家本手自动获胜', () => {
     // 只剩人类与 ai-1 活跃，其余两手提前死亡移除。
     const started = engine(initialState, { type: 'start-game' }).state;
     const onlyTwo = {
@@ -598,7 +598,7 @@ describe('弃牌开枪', () => {
       ),
     } as GameState;
 
-    // 人类跟注后 ai-1 弃牌存活 → 仅剩人类活跃，但不判胜，轮到人类继续。
+    // 人类跟注后 ai-1 弃牌存活 → 仅剩人类活跃；仍有 2 名存活，不判整局胜利，但人类本手自动获胜。
     const afterHuman = act(onlyTwo, 'human');
     const folded = engine(afterHuman, {
       type: 'player-action',
@@ -611,10 +611,11 @@ describe('弃牌开枪', () => {
       roll: 0.999,
     }).state;
 
-    expect(survived.status).toBe('playing');
+    expect(survived.status).toBe('hand-resolved');
     expect(survived.winnerId).toBe(null);
-    expect(survived.stage).toBe('flop');
-    expect(survived.currentActorId).toBe('human');
+    expect(survived.handResolution).toEqual({ kind: 'fold-win', handWinnerId: 'human' });
+    expect(survived.currentActorId).toBe(null);
+    expect(survived.players.filter((player) => player.alive)).toHaveLength(2);
   });
 
   it('死亡且 ≥2 存活 → 本手作废、洗牌进下一手，死者移除且下注不退还', () => {
@@ -681,6 +682,8 @@ describe('弃牌开枪', () => {
     expect(won.status).toBe('won');
     expect(won.winnerId).toBe('human');
     expect(won.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    // 优先级锁定：仅剩 1 名存活时走整局胜利，不误判为 fold-win 本手获胜。
+    expect(won.handResolution).toEqual({ kind: 'void', voidPlayerId: 'ai-1' });
   });
 
   it('死亡概率 = betThisHand ÷ 8，≥8 封顶 95%', () => {
@@ -762,6 +765,29 @@ describe('弃牌开枪', () => {
     // 新一手人类跟注后，下一行动者应跳过已死的 ai-1，落到 ai-2
     state = act(state, 'human');
     expect(state.currentActorId).toBe('ai-2');
+  });
+
+  it('存活退出后场上只剩 1 名活跃玩家 → 该玩家本手自动获胜，进入本手结算等待下一手', () => {
+    // 人类跟注后，ai-1/ai-2/ai-3 依次弃牌存活 → 仅剩人类活跃，无人阵亡。
+    const started = engine(initialState, { type: 'start-game' }).state;
+    let state = act(started, 'human');
+    state = foldSurvive(state, 'ai-1');
+    state = foldSurvive(state, 'ai-2');
+    state = foldSurvive(state, 'ai-3');
+
+    // 仅剩人类活跃，但仍有 4 名存活玩家 → 不判整局胜利，本手由人类自动获胜。
+    expect(state.status).toBe('hand-resolved');
+    expect(state.winnerId).toBe(null);
+    expect(state.handResolution).toEqual({ kind: 'fold-win', handWinnerId: 'human' });
+    expect(state.currentActorId).toBe(null);
+    expect(state.players.filter((player) => player.alive)).toHaveLength(4);
+
+    // 玩家点「开始下一手」后正常发起新一手。
+    const next = engine(state, { type: 'next-hand', deck: shuffleDeck(defaultDeck, () => 0) }).state;
+    expect(next.status).toBe('playing');
+    expect(next.stage).toBe('preflop');
+    expect(next.currentActorId).toBe('human');
+    expect(next.handResolution).toBe(null);
   });
 
   it('pendingFoldShoot 不匹配的 fold-shoot-expired 事件被忽略', () => {

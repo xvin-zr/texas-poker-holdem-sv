@@ -565,6 +565,10 @@
               <Badge variant="destructive" data-testid="hand-resolution-void">
                 {playerName(game.handResolution.voidPlayerId)} 死亡，本手作废
               </Badge>
+            {:else if game.handResolution?.kind === 'fold-win'}
+              <Badge variant="secondary" data-testid="hand-resolution-fold-win">
+                其他人全弃牌，{playerName(game.handResolution.handWinnerId)} 本手自动获胜
+              </Badge>
             {:else if game.handResolution?.kind === 'all-in'}
               <Badge variant="secondary" data-testid="hand-resolution-all-in">全押结算完成</Badge>
             {:else}

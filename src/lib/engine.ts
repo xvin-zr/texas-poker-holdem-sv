@@ -135,7 +135,9 @@ export type GameStatus =
 export type HandResolution =
   | { kind: 'showdown'; diedIds: PlayerId[] }
   | { kind: 'all-in'; diedIds: PlayerId[] }
-  | { kind: 'void'; voidPlayerId: PlayerId };
+  | { kind: 'void'; voidPlayerId: PlayerId }
+  // 其他人全弃牌且无人阵亡，仅剩 1 名活跃玩家：该玩家本手自动获胜，无人开枪。
+  | { kind: 'fold-win'; handWinnerId: PlayerId };
 
 export type GameState = {
   status: GameStatus;
@@ -633,6 +635,9 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
       pendingFoldShoot: null,
       currentActorId: event.playerId,
     };
+    // 弃牌存活后若仅剩 1 名活跃玩家且无人阵亡 → 该玩家本手自动获胜，暂停等待下一手。
+    const handWon = resolveIfOnlyOneActive(surviving);
+    if (handWon) return handWon;
     return advance(surviving);
   }
 
@@ -774,6 +779,24 @@ function winIfOnlyOneAlive(state: GameState): GameState | null {
     pendingFoldShoot: null,
     // 保留 allInSettlement/showdown/handResolution 供胜利屏展示最后一手结果。
     winnerId: survivors[0]?.id ?? null,
+  };
+}
+
+// 仅剩 1 名活跃玩家且 ≥2 名存活：本手由该活跃玩家自动获胜（不摊牌、不开枪），
+// 暂停进入 hand-resolved 等待玩家点「开始下一手」。仅 1 名存活时交给 winIfOnlyOneAlive 判整局胜利。
+function resolveIfOnlyOneActive(state: GameState): GameState | null {
+  const active = activePlayers(state);
+  if (active.length !== 1) return null;
+  const survivors = state.players.filter((player) => player.alive);
+  if (survivors.length <= 1) return null;
+  const sole = active[0];
+  if (!sole) return null;
+  return {
+    ...state,
+    status: 'hand-resolved',
+    currentActorId: null,
+    pendingFoldShoot: null,
+    handResolution: { kind: 'fold-win', handWinnerId: sole.id },
   };
 }
 

@@ -337,6 +337,34 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：AI-1')).toBeInTheDocument();
   });
 
+  it('其余人全弃牌且无人阵亡 → 仅剩玩家本手自动获胜，暂停等待开始下一手', async () => {
+    vi.useFakeTimers();
+    // Math.random=0.55 落在保守/均衡/激进三种性格的弃牌区间交集 [0.5, 0.65)，
+    // 且 ≥1/8 死亡概率 → 3 名 AI 依次弃牌存活，仅剩人类活跃。
+    vi.spyOn(Math, 'random').mockReturnValue(0.55);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    for (let fold = 0; fold < 3; fold += 1) {
+      await flushTimers(); // 触发 0ms AI 思考 → 弃牌
+      await vi.advanceTimersByTimeAsync(2500); // 2.5s 弃牌开枪 → 存活推进
+    }
+
+    await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('hand-resolution-fold-win')).toHaveTextContent(
+      '其他人全弃牌，人类 本手自动获胜',
+    );
+    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeEnabled();
+    // 全员无人出局，未判整局胜利（无胜利屏）
+    expect(page.getByText('出局').elements()).toHaveLength(0);
+    expect(page.getByTestId('win-screen').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+  });
+
   it('弃牌开枪致死则标记出局并作废本手，暂停等待开始下一手', async () => {
     vi.useFakeTimers();
     // roll=0 → 1/8 水位下致死
