@@ -20,8 +20,7 @@ const remoteMock = vi.hoisted(() => {
     const allowed = new Set(request.legalActions);
     const entries = Object.entries(weights[request.personality]).filter(
       ([action]) =>
-        allowed.has(action as Action) &&
-        !(request.input.stage === 'river' && action === 'all-in'),
+        allowed.has(action as Action) && !(request.input.stage === 'river' && action === 'all-in'),
     ) as [Action, number][];
     const candidates = entries.length ? entries : [['fold', 1] as [Action, number]];
     const total = candidates.reduce((sum, [, weight]) => sum + weight, 0);
@@ -48,6 +47,16 @@ const flushTimers = async () => {
   for (let count = 0; count < 20; count += 1) await vi.advanceTimersByTimeAsync(1);
 };
 
+const mockHumanLosesDeckShuffle = () => {
+  const rolls = [
+    0.7769, 0.7583, 0.7364, 0.71, 0.6778, 0.6375, 0.5857, 0.5167, 0.42, 0.275, 0.0333, 0.55,
+  ];
+  const random = vi.spyOn(Math, 'random');
+  for (const roll of rolls) random.mockReturnValueOnce(roll);
+  random.mockReturnValue(0);
+  return random;
+};
+
 // 让 AI 远程决策延迟指定毫秒，便于观察 All-in 等待中的 spinner 中间状态。
 const delayAiDecisions = (delayMs: number) => {
   const original = remoteMock.decideAiActionRemote.getMockImplementation();
@@ -59,9 +68,7 @@ const delayAiDecisions = (delayMs: number) => {
 };
 
 // 按顺序强制返回 AI 决策动作与各自思考延迟（不经过性格权重与 Math.random）。
-const mockAiActions = (
-  actions: Array<{ action: 'call' | 'fold' | 'all-in'; delayMs: number }>,
-) => {
+const mockAiActions = (actions: Array<{ action: 'call' | 'fold' | 'all-in'; delayMs: number }>) => {
   let index = 0;
   remoteMock.decideAiActionRemote.mockImplementation(async () => {
     const { action, delayMs } = actions[index++] ?? { action: 'fold' as const, delayMs: 0 };
@@ -435,9 +442,9 @@ describe('首页', () => {
     }
 
     await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
-    await expect.element(page.getByTestId('hand-resolution-fold-win')).toHaveTextContent(
-      '其他人全弃牌，人类 本手自动获胜',
-    );
+    await expect
+      .element(page.getByTestId('hand-resolution-fold-win'))
+      .toHaveTextContent('其他人全弃牌，人类 本手自动获胜');
     await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeEnabled();
     // 全员无人出局，未判整局胜利（无胜利屏）
     expect(page.getByText('出局').elements()).toHaveLength(0);
@@ -461,9 +468,9 @@ describe('首页', () => {
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await expect.element(page.getByText('你已死亡')).toBeInTheDocument();
     await expect.element(page.getByText('本局已结束')).toBeInTheDocument();
-    await expect.element(page.getByTestId('human-dead-shoot-result')).toHaveTextContent(
-      '人类开枪：死亡',
-    );
+    await expect
+      .element(page.getByTestId('human-dead-shoot-result'))
+      .toHaveTextContent('人类开枪：死亡');
     await expect.element(page.getByRole('button', { name: '下一局' })).toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(5000);
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
@@ -476,6 +483,101 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
     expect(page.getByText('本手下注：1 颗子弹').elements()).toHaveLength(4);
     expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('人类在摊牌输者开枪中死亡会停在死亡弹窗并可开下一局', async () => {
+    vi.useFakeTimers();
+    mockHumanLosesDeckShuffle();
+    mockAiActions(Array.from({ length: 12 }, () => ({ action: 'call', delayMs: 0 })));
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 4; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await flushTimers();
+    }
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('showdown-shoot-result'))
+      .toHaveTextContent(/输者开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('人类在 All-in t=2.5 弃牌开枪死亡会清掉后续亮牌与比牌定时器', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    mockAiActions([
+      { action: 'all-in', delayMs: 0 },
+      { action: 'fold', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByTestId('all-in-response-fold').click();
+    await flushTimers();
+    await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=0 展示选择');
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('all-in-fold-shoot-result'))
+      .toHaveTextContent(/全押弃牌开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(page.getByTestId('all-in-reveal').elements()).toHaveLength(0);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+  });
+
+  it('人类在 All-in t=6 比牌开枪死亡会停在死亡弹窗并可开下一局', async () => {
+    vi.useFakeTimers();
+    const random = mockHumanLosesDeckShuffle();
+    mockAiActions([
+      { action: 'all-in', delayMs: 0 },
+      { action: 'fold', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+    await flushTimers();
+    random.mockReturnValueOnce(0.999);
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect.element(page.getByTestId('all-in-reveal')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('all-in-shoot-result'))
+      .toHaveTextContent(/全押输者开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
   });
 
   it('摊牌后有存活者会暂停等待开始下一手', async () => {

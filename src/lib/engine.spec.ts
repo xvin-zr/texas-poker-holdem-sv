@@ -133,6 +133,21 @@ const tieDeck: Card[] = [
   c('5', '♠'),
   c('6', '♠'),
 ];
+const humanLosesDeck: Card[] = [
+  c('2', '♣'),
+  c('3', '♦'),
+  c('A', '♠'),
+  c('A', '♥'),
+  c('K', '♠'),
+  c('Q', '♥'),
+  c('J', '♣'),
+  c('10', '♦'),
+  c('4', '♣'),
+  c('7', '♦'),
+  c('9', '♥'),
+  c('Q', '♣'),
+  c('K', '♦'),
+];
 
 describe('引擎 reducer', () => {
   it('开始游戏会进入第一手 preflop 初始状态', () => {
@@ -424,7 +439,7 @@ describe('All-in 结算时间轴', () => {
     expect(state.handResolution).toBe(null);
   });
 
-  it('t=2.5 弃牌玩家同时开枪并按各自已抬高水位判定', () => {
+  it('t=2.5 人类弃牌开枪致死会提前进入 human-dead 且忽略后续结算事件', () => {
     let state = allInWithFoldedResponders();
     state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
 
@@ -434,6 +449,7 @@ describe('All-in 结算时间轴', () => {
       rolls: { human: 0.2, 'ai-2': 0.2 },
     }).state;
 
+    expect(state.status).toBe('human-dead');
     expect(state.players.find((player) => player.id === 'human')).toMatchObject({
       alive: false,
       betThisHand: 2,
@@ -442,9 +458,39 @@ describe('All-in 结算时间轴', () => {
       alive: true,
       betThisHand: 1,
     });
+    expect(state.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(state.allInSettlement?.step).toBe('fold-shoot');
     expect(state.allInSettlement?.foldShootResults).toEqual([
       { playerId: 'human', died: true },
       { playerId: 'ai-2', died: false },
+    ]);
+
+    const revealIgnored = engine(state, { type: 'all-in-settlement-reveal-expired' }).state;
+    const showdownIgnored = engine(state, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { human: 0 },
+    }).state;
+    expect(revealIgnored).toEqual(state);
+    expect(showdownIgnored).toEqual(state);
+  });
+
+  it('t=2.5 仅 AI 弃牌开枪致死且仍有多人存活时保持 hand-resolved 契约', () => {
+    let state = allInWithFoldedResponders();
+    state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
+
+    state = engine(state, {
+      type: 'all-in-settlement-fold-shoot-expired',
+      rolls: { human: 0.999, 'ai-2': 0 },
+    }).state;
+
+    expect(state.status).toBe('hand-resolved');
+    expect(state.players.find((player) => player.id === 'human')?.alive).toBe(true);
+    expect(state.players.find((player) => player.id === 'ai-2')?.alive).toBe(false);
+    expect(state.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(state.handResolution).toEqual({ kind: 'void', voidPlayerId: 'ai-2' });
+    expect(state.allInSettlement?.foldShootResults).toEqual([
+      { playerId: 'human', died: false },
+      { playerId: 'ai-2', died: true },
     ]);
   });
 
@@ -453,14 +499,14 @@ describe('All-in 结算时间轴', () => {
     state = {
       ...state,
       players: state.players.map((player) =>
-        player.id === 'ai-3' ? { ...player, alive: false } : player,
+        player.id === 'human' || player.id === 'ai-3' ? { ...player, alive: false } : player,
       ),
     };
     state = engine(state, { type: 'all-in-settlement-choices-expired' }).state;
 
     const wonAfterFoldShoot = engine(state, {
       type: 'all-in-settlement-fold-shoot-expired',
-      rolls: { human: 0, 'ai-2': 0 },
+      rolls: { human: 0.999, 'ai-2': 0 },
     }).state;
 
     expect(wonAfterFoldShoot.status).toBe('won');
@@ -481,6 +527,37 @@ describe('All-in 结算时间轴', () => {
     expect(wonBeforeReveal.status).toBe('won');
     expect(wonBeforeReveal.winnerId).toBe('ai-1');
     expect(wonBeforeReveal.communityCards).toHaveLength(0);
+  });
+
+  it('t=6 人类比牌开枪致死会提前进入 human-dead', () => {
+    const reveal = revealAllInSettlement(allInEveryone(humanLosesDeck));
+
+    const dead = engine(reveal, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { human: 0, 'ai-1': 0.999, 'ai-3': 0.999 },
+    }).state;
+
+    expect(reveal.allInSettlement?.showdown?.loserIds).toContain('human');
+    expect(dead.status).toBe('human-dead');
+    expect(dead.winnerId).toBe(null);
+    expect(dead.players.find((player) => player.id === 'human')?.alive).toBe(false);
+    expect(dead.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(dead.allInSettlement?.showdown).not.toBe(null);
+    expect(dead.handResolution).toEqual({ kind: 'all-in', diedIds: ['human'] });
+  });
+
+  it('t=6 仅 AI 比牌开枪致死且仍有多人存活时保持 hand-resolved 契约', () => {
+    const reveal = revealAllInSettlement(allInEveryone(defaultDeck));
+
+    const resolved = engine(reveal, {
+      type: 'all-in-settlement-showdown-expired',
+      rolls: { 'ai-1': 0, 'ai-2': 0.999, 'ai-3': 0.999 },
+    }).state;
+
+    expect(resolved.status).toBe('hand-resolved');
+    expect(resolved.players.find((player) => player.id === 'ai-1')?.alive).toBe(false);
+    expect(resolved.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(resolved.handResolution).toEqual({ kind: 'all-in', diedIds: ['ai-1'] });
   });
 
   it('t=6 复数输者同时开枪，平局与单人全押无人开枪', () => {
@@ -820,7 +897,10 @@ describe('弃牌开枪', () => {
     expect(state.players.filter((player) => player.alive)).toHaveLength(4);
 
     // 玩家点「开始下一手」后正常发起新一手。
-    const next = engine(state, { type: 'next-hand', deck: shuffleDeck(defaultDeck, () => 0) }).state;
+    const next = engine(state, {
+      type: 'next-hand',
+      deck: shuffleDeck(defaultDeck, () => 0),
+    }).state;
     expect(next.status).toBe('playing');
     expect(next.stage).toBe('preflop');
     expect(next.currentActorId).toBe('human');
@@ -918,6 +998,23 @@ describe('摊牌', () => {
     expect(next.players.every((player) => player.betThisHand === 1)).toBe(true);
     expect(next.actionHistory).toEqual([]);
     expect(next.showdown).toBe(null);
+  });
+
+  it('摊牌输者里的人类致死会提前进入 human-dead', () => {
+    const showdown = playToShowdown(humanLosesDeck).state;
+
+    const dead = engine(showdown, {
+      type: 'showdown-shoot-expired',
+      rolls: { human: 0, 'ai-1': 0.999, 'ai-3': 0.999 },
+    }).state;
+
+    expect(showdown.showdown?.loserIds).toContain('human');
+    expect(dead.status).toBe('human-dead');
+    expect(dead.winnerId).toBe(null);
+    expect(dead.players.find((player) => player.id === 'human')?.alive).toBe(false);
+    expect(dead.players.filter((player) => player.alive)).toHaveLength(3);
+    expect(dead.showdown).not.toBe(null);
+    expect(dead.handResolution).toEqual({ kind: 'showdown', diedIds: ['human'] });
   });
 
   it('所有非最大者同时开枪，一次结算可让复数输者死亡并触发胜利', () => {

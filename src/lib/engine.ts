@@ -722,7 +722,26 @@ function shootAllInFolders(state: GameState, rolls: Partial<Record<PlayerId, num
     players,
     allInSettlement: { ...settlement, step: 'fold-shoot', foldShootResults: results },
   };
-  return winIfOnlyOneAlive(next) ?? next;
+  if (results.some((result) => result.playerId === 'human' && result.died)) {
+    return {
+      ...next,
+      status: 'human-dead',
+      currentActorId: null,
+      handResolution: { kind: 'void', voidPlayerId: 'human' },
+    };
+  }
+  const final = winIfOnlyOneAlive(next);
+  if (final) return final;
+  const died = results.find((result) => result.died);
+  if (died) {
+    return {
+      ...next,
+      status: 'hand-resolved',
+      currentActorId: null,
+      handResolution: { kind: 'void', voidPlayerId: died.playerId },
+    };
+  }
+  return next;
 }
 
 function revealAllInCards(state: GameState): GameState {
@@ -769,6 +788,13 @@ function shootAllInLosers(state: GameState, rolls: Partial<Record<PlayerId, numb
     allInSettlement: { ...settlement, showdown },
     handResolution: { kind: 'all-in', diedIds },
   };
+  if (diedIds.includes('human')) {
+    return {
+      ...settled,
+      status: 'human-dead',
+      currentActorId: null,
+    };
+  }
   const final = winIfOnlyOneAlive(settled);
   if (final) return final;
   // 暂停进入 hand-resolved，保留 allInSettlement/showdown 供 UI 展示。
@@ -844,6 +870,17 @@ function applyShowdownShoot(
     (id) => !players.find((player) => player.id === id)!.alive,
   );
   const resolution: HandResolution = { kind: 'showdown', diedIds };
+  if (diedIds.includes('human')) {
+    return {
+      ...state,
+      players,
+      status: 'human-dead',
+      currentActorId: null,
+      pendingFoldShoot: null,
+      handResolution: resolution,
+      winnerId: null,
+    };
+  }
   if (survivors.length <= 1) {
     return {
       ...state,

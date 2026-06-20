@@ -455,21 +455,17 @@
   function shouldRevealHoleCards(player: GameState['players'][number]) {
     if (player.isHuman) return true;
     if (player.folded) return false;
-    if (
-      (game.status === 'all-in-settle' || game.status === 'hand-resolved') &&
-      allInSettlement?.step === 'reveal' &&
-      allInSettlement.allInPlayerIds.includes(player.id) &&
-      player.alive
-    )
+    if (allInSettlement?.step === 'reveal' && allInSettlement.allInPlayerIds.includes(player.id))
       return true;
-    return game.status === 'showdown' || game.status === 'hand-resolved' || !player.alive;
+    if (game.showdown?.entries.some((entry) => entry.playerId === player.id)) return true;
+    return Boolean(
+      allInSettlement?.showdown?.entries.some((entry) => entry.playerId === player.id),
+    );
   }
 
   function isAiThinking(player: GameState['players'][number]) {
     if (player.id === thinkingPlayerId) return true;
-    return Boolean(
-      game.allInWait && isAllInResponderPending(player.id) && !player.isHuman,
-    );
+    return Boolean(game.allInWait && isAllInResponderPending(player.id) && !player.isHuman);
   }
 
   function playerName(playerId: PlayerId) {
@@ -523,39 +519,37 @@
           <Button size="lg" onclick={startGame}>开始</Button>
         </CardContent>
       </Card>
-    {:else if game.status === 'human-dead'}
-      <AlertDialog open={true}>
-        <AlertDialogContent data-testid="human-dead-dialog">
-          <AlertDialogHeader>
-            <AlertDialogTitle>你已死亡</AlertDialogTitle>
-            <AlertDialogDescription>本局已结束</AlertDialogDescription>
-            {#if lastShootLabel}
-              <Badge variant="destructive" data-testid="human-dead-shoot-result">
-                {lastShootLabel.text}
-              </Badge>
-            {/if}
-            {#if lastShowdownLabel}
-              <Badge variant="destructive" data-testid="showdown-shoot-result">
-                {lastShowdownLabel}
-              </Badge>
-            {/if}
-            {#if lastAllInFoldShootLabel}
-              <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
-                {lastAllInFoldShootLabel}
-              </Badge>
-            {/if}
-            {#if lastAllInShootLabel}
-              <Badge variant="destructive" data-testid="all-in-shoot-result">
-                {lastAllInShootLabel}
-              </Badge>
-            {/if}
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <Button onclick={startGame}>下一局</Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     {:else}
+      {#if game.status === 'human-dead'}
+        <AlertDialog open={true}>
+          <AlertDialogContent data-testid="human-dead-dialog">
+            <AlertDialogHeader>
+              <AlertDialogTitle>你已死亡</AlertDialogTitle>
+              <AlertDialogDescription>本局已结束</AlertDialogDescription>
+              {#if lastAllInShootLabel}
+                <Badge variant="destructive" data-testid="all-in-shoot-result">
+                  {lastAllInShootLabel}
+                </Badge>
+              {:else if lastAllInFoldShootLabel}
+                <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
+                  {lastAllInFoldShootLabel}
+                </Badge>
+              {:else if lastShowdownLabel}
+                <Badge variant="destructive" data-testid="showdown-shoot-result">
+                  {lastShowdownLabel}
+                </Badge>
+              {:else if lastShootLabel}
+                <Badge variant="destructive" data-testid="human-dead-shoot-result">
+                  {lastShootLabel.text}
+                </Badge>
+              {/if}
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <Button onclick={startGame}>下一局</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      {/if}
       <div class="flex flex-wrap gap-2">
         <Badge>当前阶段：{currentStageName}</Badge>
         <Badge variant="secondary">当前行动者：{currentActorName}</Badge>
@@ -700,7 +694,7 @@
         </AlertDialog>
       {/if}
 
-      {#if (game.status === 'all-in-settle' || game.status === 'hand-resolved') && allInSettlement}
+      {#if (game.status === 'all-in-settle' || game.status === 'hand-resolved' || game.status === 'human-dead') && allInSettlement}
         <Card data-testid="all-in-settle-panel">
           <CardHeader><CardTitle>全押结算时间轴</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -746,7 +740,7 @@
         </Card>
       {/if}
 
-      {#if (game.status === 'showdown' || game.status === 'hand-resolved') && game.showdown}
+      {#if (game.status === 'showdown' || game.status === 'hand-resolved' || game.status === 'human-dead') && game.showdown}
         <Card data-testid="showdown-panel">
           <CardHeader><CardTitle>摊牌</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -820,7 +814,10 @@
                 {#if player.allIn}<Badge>全押</Badge>{/if}
                 {#if isAllInResponderPending(player.id)}<Badge variant="outline">待响应</Badge>{/if}
                 {#if player.id === game.currentActorId}<Badge>行动中</Badge>{/if}
-                {#if isAiThinking(player)}<Spinner class="size-4" data-testid="thinking-spinner" />{/if}
+                {#if isAiThinking(player)}<Spinner
+                    class="size-4"
+                    data-testid="thinking-spinner"
+                  />{/if}
               </div>
             </CardHeader>
             <CardContent class="space-y-3">
