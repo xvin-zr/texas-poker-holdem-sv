@@ -92,7 +92,7 @@
     if (!shoot) return null;
     const name = game.players.find((player) => player.id === shoot.playerId)?.name ?? '';
     const outcome = shoot.died ? '死亡' : '存活';
-    const suffix = shoot.died && game.status !== 'won' ? '·本手作废' : '';
+    const suffix = shoot.died && game.status === 'hand-resolved' ? '·本手作废' : '';
     return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
   });
   const lastShowdownLabel = $derived.by(() => {
@@ -523,6 +523,38 @@
           <Button size="lg" onclick={startGame}>开始</Button>
         </CardContent>
       </Card>
+    {:else if game.status === 'human-dead'}
+      <AlertDialog open={true}>
+        <AlertDialogContent data-testid="human-dead-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>你已死亡</AlertDialogTitle>
+            <AlertDialogDescription>本局已结束</AlertDialogDescription>
+            {#if lastShootLabel}
+              <Badge variant="destructive" data-testid="human-dead-shoot-result">
+                {lastShootLabel.text}
+              </Badge>
+            {/if}
+            {#if lastShowdownLabel}
+              <Badge variant="destructive" data-testid="showdown-shoot-result">
+                {lastShowdownLabel}
+              </Badge>
+            {/if}
+            {#if lastAllInFoldShootLabel}
+              <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
+                {lastAllInFoldShootLabel}
+              </Badge>
+            {/if}
+            {#if lastAllInShootLabel}
+              <Badge variant="destructive" data-testid="all-in-shoot-result">
+                {lastAllInShootLabel}
+              </Badge>
+            {/if}
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button onclick={startGame}>下一局</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     {:else}
       <div class="flex flex-wrap gap-2">
         <Badge>当前阶段：{currentStageName}</Badge>

@@ -129,6 +129,7 @@ export type GameStatus =
   | 'all-in-settle'
   | 'showdown'
   | 'hand-resolved'
+  | 'human-dead'
   | 'won';
 
 // 手结束且 ≥2 存活时的结算暂停判别器；UI 据此展示「本手结算」与「开始下一手」按钮。
@@ -644,6 +645,17 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
   const players = state.players.map((candidate) =>
     candidate.id === event.playerId ? { ...candidate, alive: false } : candidate,
   );
+  if (player.isHuman) {
+    return {
+      ...state,
+      players,
+      status: 'human-dead',
+      currentActorId: null,
+      pendingFoldShoot: null,
+      handResolution: { kind: 'void', voidPlayerId: event.playerId },
+    };
+  }
+
   const survivors = players.filter((candidate) => candidate.alive);
   if (survivors.length <= 1) {
     return {

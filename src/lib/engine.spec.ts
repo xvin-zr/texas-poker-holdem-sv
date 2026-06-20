@@ -618,7 +618,7 @@ describe('弃牌开枪', () => {
     expect(survived.players.filter((player) => player.alive)).toHaveLength(2);
   });
 
-  it('死亡且 ≥2 存活 → 本手作废、洗牌进下一手，死者移除且下注不退还', () => {
+  it('AI 死亡且 ≥2 存活 → 本手作废、洗牌进下一手，死者移除且下注不退还', () => {
     const started = engine(initialState, { type: 'start-game' }).state;
     // 人类多跟注几次抬高水位，保证开枪致死。
     let state = act(started, 'human');
@@ -655,6 +655,43 @@ describe('弃牌开枪', () => {
     expect(next.actionHistory).toEqual([]);
     expect(next.currentActorId).toBe('human');
     expect(next.handResolution).toBe(null);
+  });
+
+  it('人类弃牌开枪死亡会提前结束整局且忽略 next-hand', () => {
+    const personalities: Record<AiPlayerId, Personality> = {
+      'ai-1': 'conservative',
+      'ai-2': 'balanced',
+      'ai-3': 'aggressive',
+    };
+    const started = engine(initialState, { type: 'start-game', personalities }).state;
+    const folded = engine(started, {
+      type: 'player-action',
+      playerId: 'human',
+      decision: { action: 'fold' },
+    }).state;
+
+    const dead = engine(folded, {
+      type: 'fold-shoot-expired',
+      playerId: 'human',
+      roll: 0,
+    }).state;
+
+    expect(dead.status).toBe('human-dead');
+    expect(dead.winnerId).toBe(null);
+    expect(dead.pendingFoldShoot).toBe(null);
+    expect(dead.handResolution).toEqual({ kind: 'void', voidPlayerId: 'human' });
+    expect(dead.players.find((player) => player.id === 'human')?.alive).toBe(false);
+    expect(dead.players.filter((player) => player.alive)).toHaveLength(3);
+    const nextHandIgnored = engine(dead, {
+      type: 'next-hand',
+      deck: shuffleDeck(defaultDeck, () => 0),
+    }).state;
+    expect(nextHandIgnored).toEqual(dead);
+
+    const reset = engine(dead, { type: 'start-game', deck: defaultDeck }).state;
+    expect(reset.status).toBe('playing');
+    expect(reset.aiPersonalities).toEqual(personalities);
+    expect(reset.players.every((player) => player.alive)).toBe(true);
   });
 
   it('死亡且仅剩 1 存活 → 触发胜利判定（占位）', () => {

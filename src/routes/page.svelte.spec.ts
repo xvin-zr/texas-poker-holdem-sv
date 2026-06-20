@@ -447,7 +447,7 @@ describe('首页', () => {
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
   });
 
-  it('弃牌开枪致死则标记出局并作废本手，暂停等待开始下一手', async () => {
+  it('人类弃牌致死会出现死亡弹窗，点击下一局后重置新局', async () => {
     vi.useFakeTimers();
     // roll=0 → 1/8 水位下致死
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -458,17 +458,24 @@ describe('首页', () => {
 
     await vi.advanceTimersByTimeAsync(2500);
 
-    await expect.element(page.getByTestId('fold-shoot-result')).toHaveTextContent('人类开枪：死亡');
-    // 人类出局，暂停在 hand-resolved，行动按钮不可用
-    expect(page.getByText('出局').elements()).toHaveLength(1);
-    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeInTheDocument();
-    await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByText('你已死亡')).toBeInTheDocument();
+    await expect.element(page.getByText('本局已结束')).toBeInTheDocument();
+    await expect.element(page.getByTestId('human-dead-shoot-result')).toHaveTextContent(
+      '人类开枪：死亡',
+    );
+    await expect.element(page.getByRole('button', { name: '下一局' })).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
 
-    await page.getByRole('button', { name: '开始下一手' }).click();
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
 
-    // 进下一手 preflop，其余 3 名存活玩家重开 ante=1
+    await expect.element(page.getByRole('alertdialog')).not.toBeInTheDocument();
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
-    expect(page.getByText('存活').elements()).toHaveLength(3);
+    await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
+    expect(page.getByText('本手下注：1 颗子弹').elements()).toHaveLength(4);
+    expect(page.getByText('存活').elements()).toHaveLength(4);
   });
 
   it('摊牌后有存活者会暂停等待开始下一手', async () => {
