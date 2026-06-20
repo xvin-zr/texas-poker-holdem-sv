@@ -86,6 +86,7 @@
   );
   const canHumanAllIn = $derived(canHumanAct && game.stage !== 'river');
   const humanAllInPending = $derived(isAllInResponderPending('human'));
+  const humanPlayer = $derived(game.players.find((player) => player.isHuman));
   const lastShootLabel = $derived.by(() => {
     const shoot = lastShoot;
     if (!shoot) return null;
@@ -620,6 +621,38 @@
               <Badge variant="destructive" data-testid="all-in-countdown">
                 人类倒计时：{allInHumanRemaining}s
               </Badge>
+              <div class="space-y-3 pt-2">
+                <div>
+                  <p class="text-sm font-medium">你的底牌</p>
+                  <div class="flex gap-2 pt-1">
+                    {#each humanPlayer?.holeCards ?? [] as card (card.rank + card.suit)}
+                      <span
+                        class="bg-background rounded-lg border px-3 py-2 font-mono"
+                        data-testid="all-in-human-hole-card"
+                      >
+                        {cardText(card)}
+                      </span>
+                    {/each}
+                  </div>
+                </div>
+                <div>
+                  <p class="text-sm font-medium">当前公共牌</p>
+                  <div class="flex flex-wrap gap-2 pt-1">
+                    {#if game.communityCards.length === 0}
+                      <p class="text-muted-foreground text-sm">翻牌前尚无公共牌</p>
+                    {:else}
+                      {#each game.communityCards as card (card.rank + card.suit)}
+                        <span
+                          class="bg-background rounded-lg border px-3 py-2 font-mono"
+                          data-testid="all-in-community-card"
+                        >
+                          {cardText(card)}
+                        </span>
+                      {/each}
+                    {/if}
+                  </div>
+                </div>
+              </div>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogAction

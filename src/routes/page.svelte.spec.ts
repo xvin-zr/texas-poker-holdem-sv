@@ -151,6 +151,10 @@ describe('首页', () => {
     await expect.element(page.getByTestId('all-in-response-fold')).toBeEnabled();
     await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
+    // 弹窗内展示人类自己的 2 张底牌，翻牌前尚无公共牌，且不出现在座位的 AI 底牌揭示
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    await expect.element(page.getByText('翻牌前尚无公共牌')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(10000);
     await flushTimers();
@@ -284,6 +288,60 @@ describe('首页', () => {
     await expect.element(page.getByRole('alertdialog')).not.toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('人类：弃牌')).toBeInTheDocument();
+  });
+
+  it('翻牌阶段人类响应全押时弹窗展示 3 张公共牌且不揭示 AI 底牌', async () => {
+    vi.useFakeTimers();
+    // 直接控制 AI 决策：翻牌前三家跟注，翻牌时 AI-1 全押触发人类响应。
+    mockAiActions([
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    // 翻牌阶段人类继续跟注，随后 AI-1 全押触发 All-in 等待
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('all-in-community-card').elements()).toHaveLength(3);
+    // 弹窗内不展示任何 AI 底牌（AI 底牌仍在座位隐藏）
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
+  });
+
+  it('转牌阶段人类响应全押时弹窗展示 4 张公共牌', async () => {
+    vi.useFakeTimers();
+    // 翻牌前、翻牌都三家跟注，转牌时 AI-1 全押触发人类响应。
+    mockAiActions([
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('all-in-community-card').elements()).toHaveLength(4);
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
   });
 
   it('全押弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
