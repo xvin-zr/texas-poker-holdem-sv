@@ -472,7 +472,9 @@ describe('首页', () => {
       .element(page.getByTestId('human-dead-shoot-result'))
       .toHaveTextContent('人类开枪：死亡');
     // 翻牌前死亡弹窗展示「尚无公共牌」、人类自己的 2 张底牌，且不出示任何 AI 底牌
-    await expect.element(page.getByTestId('human-dead-dialog').getByText('尚无公共牌')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByText('尚无公共牌'))
+      .toBeInTheDocument();
     expect(page.getByTestId('dead-human-hole-card').elements()).toHaveLength(2);
     expect(page.getByTestId('dead-revealed-hole-card').elements()).toHaveLength(0);
     await expect.element(page.getByRole('button', { name: '下一局' })).toBeInTheDocument();
@@ -572,7 +574,9 @@ describe('首页', () => {
       .element(page.getByTestId('human-dead-dialog').getByTestId('all-in-fold-shoot-result'))
       .toHaveTextContent(/全押弃牌开枪：.*人类死亡/);
     // All-in t=2.5 弃牌开枪死亡发生在亮牌前：弹窗展示人类底牌、无公共牌、无 AI 底牌
-    await expect.element(page.getByTestId('human-dead-dialog').getByText('尚无公共牌')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByText('尚无公共牌'))
+      .toBeInTheDocument();
     expect(page.getByTestId('dead-human-hole-card').elements()).toHaveLength(2);
     expect(page.getByTestId('dead-revealed-hole-card').elements()).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(3500);
