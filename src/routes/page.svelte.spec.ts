@@ -11,30 +11,32 @@ const remoteMock = vi.hoisted(() => {
     aggressive: { call: 0.5, fold: 0.15, 'all-in': 0.35 },
   };
 
+  const originalImplementation = async (request: {
+    personality: Personality;
+    legalActions: Action[];
+    input: { stage: string };
+  }) => {
+    // 远程传输 mock：复刻离线权重，只测试页面外部行为。
+    const allowed = new Set(request.legalActions);
+    const entries = Object.entries(weights[request.personality]).filter(
+      ([action]) =>
+        allowed.has(action as Action) &&
+        !(request.input.stage === 'river' && action === 'all-in'),
+    ) as [Action, number][];
+    const candidates = entries.length ? entries : [['fold', 1] as [Action, number]];
+    const total = candidates.reduce((sum, [, weight]) => sum + weight, 0);
+    let roll = Math.random() * total;
+    for (const [action, weight] of candidates) {
+      roll -= weight;
+      if (roll < 0) return { action };
+    }
+    return { action: candidates.at(-1)?.[0] ?? 'fold' };
+  };
+
+  const fn = vi.fn(originalImplementation);
   return {
-    decideAiActionRemote: vi.fn(
-      async (request: {
-        personality: Personality;
-        legalActions: Action[];
-        input: { stage: string };
-      }) => {
-        // 远程传输 mock：复刻离线权重，只测试页面外部行为。
-        const allowed = new Set(request.legalActions);
-        const entries = Object.entries(weights[request.personality]).filter(
-          ([action]) =>
-            allowed.has(action as Action) &&
-            !(request.input.stage === 'river' && action === 'all-in'),
-        ) as [Action, number][];
-        const candidates = entries.length ? entries : [['fold', 1] as [Action, number]];
-        const total = candidates.reduce((sum, [, weight]) => sum + weight, 0);
-        let roll = Math.random() * total;
-        for (const [action, weight] of candidates) {
-          roll -= weight;
-          if (roll < 0) return { action };
-        }
-        return { action: candidates.at(-1)?.[0] ?? 'fold' };
-      },
-    ),
+    decideAiActionRemote: fn,
+    resetImplementation: () => fn.mockImplementation(originalImplementation),
   };
 });
 
@@ -46,9 +48,31 @@ const flushTimers = async () => {
   for (let count = 0; count < 20; count += 1) await vi.advanceTimersByTimeAsync(1);
 };
 
+// 让 AI 远程决策延迟指定毫秒，便于观察 All-in 等待中的 spinner 中间状态。
+const delayAiDecisions = (delayMs: number) => {
+  const original = remoteMock.decideAiActionRemote.getMockImplementation();
+  remoteMock.decideAiActionRemote.mockImplementation(async (request) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (!original) return { action: 'fold' };
+    return original(request);
+  });
+};
+
+// 按顺序强制返回 AI 决策动作与各自思考延迟（不经过性格权重与 Math.random）。
+const mockAiActions = (
+  actions: Array<{ action: 'call' | 'fold' | 'all-in'; delayMs: number }>,
+) => {
+  let index = 0;
+  remoteMock.decideAiActionRemote.mockImplementation(async () => {
+    const { action, delayMs } = actions[index++] ?? { action: 'fold' as const, delayMs: 0 };
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { action };
+  });
+};
+
 describe('首页', () => {
   afterEach(() => {
-    remoteMock.decideAiActionRemote.mockClear();
+    remoteMock.resetImplementation();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -460,6 +484,96 @@ describe('首页', () => {
       .map((card) => card.textContent);
     expect(humanCards).toHaveLength(2);
     expect(humanCards).not.toEqual(['A♠', 'A♥']);
+  });
+
+  it('正常行动轮轮到 AI 时该 AI 座位出现 spinner，轮到人类时无 spinner', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    // 人类回合，无 AI 思考 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '跟注' }).click();
+    await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
+    // 仅当前行动的 AI 座位有 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    await flushTimers();
+    await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('All-in 等待阶段每个待响应 AI 座位显示 spinner，响应完后消失', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    delayAiDecisions(50);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    // 推进到 AI-1 完成全押并触发 All-in 等待（AI-2/AI-3 尚未响应）
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    // 待响应 AI 为 AI-2、AI-3，共 2 个 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
+
+    // 再推进让 AI-2/AI-3 响应完，spinner 应全部消失
+    await vi.advanceTimersByTimeAsync(100);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('All-in 等待阶段某个 AI 弃牌响应后其 spinner 消失，其他 AI 仍转动', async () => {
+    vi.useFakeTimers();
+    // AI-1 快速全押触发等待；AI-2 较慢弃牌；AI-3 最慢全押，便于观察中间状态。
+    mockAiActions([
+      { action: 'all-in', delayMs: 50 },
+      { action: 'fold', delayMs: 100 },
+      { action: 'all-in', delayMs: 500 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    // 推进到 AI-1 已全押、All-in 等待已触发，AI-2/AI-3 均在思考
+    await vi.advanceTimersByTimeAsync(100);
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
+
+    // 再推进让 AI-2 弃牌响应，其 spinner 消失；AI-3 仍在思考
+    await vi.advanceTimersByTimeAsync(150);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    // 再推进让 AI-3 全押，spinner 全部消失
+    await vi.advanceTimersByTimeAsync(500);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('人类座位在任何状态下都不出现思考 spinner', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    delayAiDecisions(50);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    // 人类回合无 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '跟注' }).click();
+    // AI-1 行动轮有 spinner，但不是人类座位
+    await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    // 推进到 AI-1 全押进入 All-in 等待，人类自己也待响应但无 spinner
+    await vi.advanceTimersByTimeAsync(50);
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-countdown')).toBeInTheDocument();
+    // 只有 AI-2、AI-3 两个 AI 待响应座位有 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
   });
 
   it('AI 性格标识不对玩家展示', async () => {

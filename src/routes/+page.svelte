@@ -15,6 +15,7 @@
   import CardHeader from '$lib/components/ui/card/card-header.svelte';
   import CardTitle from '$lib/components/ui/card/card-title.svelte';
   import Card from '$lib/components/ui/card/card.svelte';
+  import Spinner from '$lib/components/ui/spinner/spinner.svelte';
   import {
     ALL_IN_HUMAN_TIMEOUT_MS,
     ALL_IN_SETTLEMENT_CHOICE_DELAY_MS,
@@ -463,6 +464,13 @@
     return game.status === 'showdown' || game.status === 'hand-resolved' || !player.alive;
   }
 
+  function isAiThinking(player: GameState['players'][number]) {
+    if (player.id === thinkingPlayerId) return true;
+    return Boolean(
+      game.allInWait && isAllInResponderPending(player.id) && !player.isHuman,
+    );
+  }
+
   function playerName(playerId: PlayerId) {
     return game.players.find((player) => player.id === playerId)?.name ?? playerId;
   }
@@ -747,6 +755,7 @@
                 {#if player.allIn}<Badge>全押</Badge>{/if}
                 {#if isAllInResponderPending(player.id)}<Badge variant="outline">待响应</Badge>{/if}
                 {#if player.id === game.currentActorId}<Badge>行动中</Badge>{/if}
+                {#if isAiThinking(player)}<Spinner class="size-4" data-testid="thinking-spinner" />{/if}
               </div>
             </CardHeader>
             <CardContent class="space-y-3">
