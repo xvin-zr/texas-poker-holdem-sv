@@ -6,7 +6,9 @@
       "name": "texas-poker-holdem-2606",
       "dependencies": {
         "@effect/platform-browser": "^4.0.0-beta.84",
+        "@tanstack/ai": "^0.32.0",
         "@tanstack/ai-openai": "^0.15.1",
+        "@tanstack/ai-openrouter": "^0.14.0",
         "@tanstack/ai-svelte": "^0.13.9",
         "@xstate/store-svelte": "^2.0.0",
         "effect": "^4.0.0-beta.84",
@@ -240,6 +242,8 @@
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.5", "https://registry.npmmirror.com/@napi-rs/wasm-runtime/-/wasm-runtime-1.1.5.tgz", { "dependencies": { "@tybys/wasm-util": "^0.10.2" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-AWPoBRJ9tsnVhor4sjO7rkni+7p+2IAEFj6cx06UgP10jkQHqay/36uRV/bFkgrh18D9vb4cr8Q0Pthskgzy+Q=="],
 
+    "@openrouter/sdk": ["@openrouter/sdk@0.12.35", "https://registry.npmmirror.com/@openrouter/sdk/-/sdk-0.12.35.tgz", { "dependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-s4QVLLnG1AmfW3TjnnHUqGfsCkzwVK+kboGcZmKbde09m1DPqgzl4RUFt/HJ5v97MX8aEaN0UG3mKv2S+qj2Gw=="],
+
     "@oxc-project/types": ["@oxc-project/types@0.133.0", "https://registry.npmmirror.com/@oxc-project/types/-/types-0.133.0.tgz", {}, "sha512-KzkdCd6Uxqnf6l3HOw1xfatAlUURA0g14cvBYFyJ5SaNOQbOUvBr9PKArcPcrNIeRsBdgcUzOGrhKveVpvOIGA=="],
 
     "@oxfmt/binding-android-arm-eabi": ["@oxfmt/binding-android-arm-eabi@0.55.0", "https://registry.npmmirror.com/@oxfmt/binding-android-arm-eabi/-/binding-android-arm-eabi-0.55.0.tgz", { "os": "android", "cpu": "arm" }, "sha512-+rFDOqQe5LOWgxrAJaZgLRudr6GQm0wGI6gtu7vVkrdLGjNMUSGbAlaCr8j7F2H2Er97vYQCU8WDb30onqMM1g=="],
@@ -383,6 +387,8 @@
     "@tanstack/ai-event-client": ["@tanstack/ai-event-client@0.6.3", "https://registry.npmmirror.com/@tanstack/ai-event-client/-/ai-event-client-0.6.3.tgz", { "dependencies": { "@tanstack/devtools-event-client": "^0.4.1" }, "peerDependencies": { "@tanstack/ai": "0.32.0" } }, "sha512-aQb+v9a4T+uDS3VuDGKOdhwPvr2iwjHVweroXHwbasmvClFqV6WJhoekv74VJrhJrlwz8wVMEPcwlKHxnSAzLQ=="],
 
     "@tanstack/ai-openai": ["@tanstack/ai-openai@0.15.1", "https://registry.npmmirror.com/@tanstack/ai-openai/-/ai-openai-0.15.1.tgz", { "dependencies": { "@tanstack/ai-utils": "0.2.2", "@tanstack/openai-base": "0.8.6", "openai": "^6.41.0" }, "peerDependencies": { "@tanstack/ai": "^0.32.0", "@tanstack/ai-client": "^0.18.0", "zod": "^4.0.0" } }, "sha512-zhvCW4GQSgKL6KLtFHOX1k0+mqfrNCZogjQNVAqfrvNwLbhTDkZG0h579sru8AtvPiIaOU2v1dpX+YYxzlaNBg=="],
+
+    "@tanstack/ai-openrouter": ["@tanstack/ai-openrouter@0.14.0", "https://registry.npmmirror.com/@tanstack/ai-openrouter/-/ai-openrouter-0.14.0.tgz", { "dependencies": { "@openrouter/sdk": "0.12.35", "@tanstack/ai-utils": "0.2.2" }, "peerDependencies": { "@tanstack/ai": "^0.32.0" } }, "sha512-zMIngP5ssjrz/P+1pDMM6SvskzzOiO7sltR56W9EMvwtshux+cdxeqrOMRSD2NiqOdc1p1dX7ceOW3AhFW+c+A=="],
 
     "@tanstack/ai-svelte": ["@tanstack/ai-svelte@0.13.9", "https://registry.npmmirror.com/@tanstack/ai-svelte/-/ai-svelte-0.13.9.tgz", { "dependencies": { "@tanstack/ai-client": "0.18.0" }, "peerDependencies": { "@tanstack/ai": "^0.32.0", "svelte": "^5.0.0" } }, "sha512-KaQL6JH+WgoMcjOJ1s81NIMaGW8yk9SV7n+5dD4cA2fzV/t4yKHE5MCZ/nkLh614LexQ6Re8j3XRDAY92W3OrQ=="],
 

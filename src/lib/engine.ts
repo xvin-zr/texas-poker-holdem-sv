@@ -19,7 +19,7 @@ export type EngineError = 'missing-decision-input' | 'invalid-card-count';
 // 弃牌开枪外置定时器：引擎发 effect 让 UI 层 2.5s 后回灌 fold-shoot-expired 事件。
 export const FOLD_SHOOT_DELAY_MS = 2500;
 export const SHOWDOWN_SHOOT_DELAY_MS = 2500;
-export const ALL_IN_HUMAN_TIMEOUT_MS = 7000;
+export const ALL_IN_HUMAN_TIMEOUT_MS = 10000;
 export const ALL_IN_SETTLEMENT_CHOICE_DELAY_MS = 0;
 export const ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS = 2500;
 export const ALL_IN_SETTLEMENT_REVEAL_DELAY_MS = 1000;
@@ -129,13 +129,16 @@ export type GameStatus =
   | 'all-in-settle'
   | 'showdown'
   | 'hand-resolved'
+  | 'human-dead'
   | 'won';
 
 // 手结束且 ≥2 存活时的结算暂停判别器；UI 据此展示「本手结算」与「开始下一手」按钮。
 export type HandResolution =
   | { kind: 'showdown'; diedIds: PlayerId[] }
   | { kind: 'all-in'; diedIds: PlayerId[] }
-  | { kind: 'void'; voidPlayerId: PlayerId };
+  | { kind: 'void'; voidPlayerId: PlayerId }
+  // 其他人全弃牌且无人阵亡，仅剩 1 名活跃玩家：该玩家本手自动获胜，无人开枪。
+  | { kind: 'fold-win'; handWinnerId: PlayerId };
 
 export type GameState = {
   status: GameStatus;
@@ -312,6 +315,13 @@ export function createDecisionInput(
   });
 }
 
+export function deriveLegalActions(input: DecisionInput): Decision['action'][] {
+  const actions: Decision['action'][] = input.pendingAllIn
+    ? ['all-in', 'fold']
+    : ['call', 'fold', 'all-in'];
+  return input.stage === 'river' ? actions.filter((action) => action !== 'all-in') : actions;
+}
+
 export async function decideForAi(
   decider: AiDecider,
   state: GameState,
@@ -320,8 +330,11 @@ export async function decideForAi(
   const input = createDecisionInput(state, playerId);
   if (Result.isFailure(input)) return Result.succeed({ action: 'fold' });
 
+  const legalActions = deriveLegalActions(input.success);
   try {
-    return Result.succeed(await decider.decide(input.success));
+    const decision = await decider.decide(input.success);
+    if (!legalActions.includes(decision.action)) return Result.succeed({ action: 'fold' });
+    return Result.succeed(decision);
   } catch {
     return Result.succeed({ action: 'fold' });
   }
@@ -364,10 +377,6 @@ export function weightedAiDecision(
     if (roll < 0) return { action };
   }
   return { action: entries[entries.length - 1]?.[0] ?? 'fold' };
-}
-
-export function randomThinkDelayMs(random = Math.random) {
-  return 3000 + Math.floor(random() * 2001);
 }
 
 export function compareHands(left: HandRank, right: HandRank) {
@@ -627,12 +636,26 @@ function applyFoldShoot(state: GameState, event: FoldShootExpired): GameState {
       pendingFoldShoot: null,
       currentActorId: event.playerId,
     };
+    // 弃牌存活后若仅剩 1 名活跃玩家且无人阵亡 → 该玩家本手自动获胜，暂停等待下一手。
+    const handWon = resolveIfOnlyOneActive(surviving);
+    if (handWon) return handWon;
     return advance(surviving);
   }
 
   const players = state.players.map((candidate) =>
     candidate.id === event.playerId ? { ...candidate, alive: false } : candidate,
   );
+  if (player.isHuman) {
+    return {
+      ...state,
+      players,
+      status: 'human-dead',
+      currentActorId: null,
+      pendingFoldShoot: null,
+      handResolution: { kind: 'void', voidPlayerId: event.playerId },
+    };
+  }
+
   const survivors = players.filter((candidate) => candidate.alive);
   if (survivors.length <= 1) {
     return {
@@ -699,7 +722,26 @@ function shootAllInFolders(state: GameState, rolls: Partial<Record<PlayerId, num
     players,
     allInSettlement: { ...settlement, step: 'fold-shoot', foldShootResults: results },
   };
-  return winIfOnlyOneAlive(next) ?? next;
+  if (results.some((result) => result.playerId === 'human' && result.died)) {
+    return {
+      ...next,
+      status: 'human-dead',
+      currentActorId: null,
+      handResolution: { kind: 'void', voidPlayerId: 'human' },
+    };
+  }
+  const final = winIfOnlyOneAlive(next);
+  if (final) return final;
+  const died = results.find((result) => result.died);
+  if (died) {
+    return {
+      ...next,
+      status: 'hand-resolved',
+      currentActorId: null,
+      handResolution: { kind: 'void', voidPlayerId: died.playerId },
+    };
+  }
+  return next;
 }
 
 function revealAllInCards(state: GameState): GameState {
@@ -746,6 +788,13 @@ function shootAllInLosers(state: GameState, rolls: Partial<Record<PlayerId, numb
     allInSettlement: { ...settlement, showdown },
     handResolution: { kind: 'all-in', diedIds },
   };
+  if (diedIds.includes('human')) {
+    return {
+      ...settled,
+      status: 'human-dead',
+      currentActorId: null,
+    };
+  }
   const final = winIfOnlyOneAlive(settled);
   if (final) return final;
   // 暂停进入 hand-resolved，保留 allInSettlement/showdown 供 UI 展示。
@@ -768,6 +817,24 @@ function winIfOnlyOneAlive(state: GameState): GameState | null {
     pendingFoldShoot: null,
     // 保留 allInSettlement/showdown/handResolution 供胜利屏展示最后一手结果。
     winnerId: survivors[0]?.id ?? null,
+  };
+}
+
+// 仅剩 1 名活跃玩家且 ≥2 名存活：本手由该活跃玩家自动获胜（不摊牌、不开枪），
+// 暂停进入 hand-resolved 等待玩家点「开始下一手」。仅 1 名存活时交给 winIfOnlyOneAlive 判整局胜利。
+function resolveIfOnlyOneActive(state: GameState): GameState | null {
+  const active = activePlayers(state);
+  if (active.length !== 1) return null;
+  const survivors = state.players.filter((player) => player.alive);
+  if (survivors.length <= 1) return null;
+  const sole = active[0];
+  if (!sole) return null;
+  return {
+    ...state,
+    status: 'hand-resolved',
+    currentActorId: null,
+    pendingFoldShoot: null,
+    handResolution: { kind: 'fold-win', handWinnerId: sole.id },
   };
 }
 
@@ -803,6 +870,17 @@ function applyShowdownShoot(
     (id) => !players.find((player) => player.id === id)!.alive,
   );
   const resolution: HandResolution = { kind: 'showdown', diedIds };
+  if (diedIds.includes('human')) {
+    return {
+      ...state,
+      players,
+      status: 'human-dead',
+      currentActorId: null,
+      pendingFoldShoot: null,
+      handResolution: resolution,
+      winnerId: null,
+    };
+  }
   if (survivors.length <= 1) {
     return {
       ...state,

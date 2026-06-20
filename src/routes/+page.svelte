@@ -15,20 +15,19 @@
   import CardHeader from '$lib/components/ui/card/card-header.svelte';
   import CardTitle from '$lib/components/ui/card/card-title.svelte';
   import Card from '$lib/components/ui/card/card.svelte';
+  import Spinner from '$lib/components/ui/spinner/spinner.svelte';
   import {
     ALL_IN_HUMAN_TIMEOUT_MS,
     ALL_IN_SETTLEMENT_CHOICE_DELAY_MS,
     ALL_IN_SETTLEMENT_FOLD_SHOOT_DELAY_MS,
     ALL_IN_SETTLEMENT_REVEAL_DELAY_MS,
     ALL_IN_SETTLEMENT_SHOWDOWN_DELAY_MS,
-    createWeightedAiDecider,
     decideForAi,
     defaultDeck,
     engine,
     FOLD_SHOOT_DELAY_MS,
     SHOWDOWN_SHOOT_DELAY_MS,
     initialState,
-    randomThinkDelayMs,
     shuffleDeck,
     type Card as PlayingCard,
     type Decision,
@@ -39,6 +38,8 @@
   import * as Match from 'effect/Match';
   import * as Result from 'effect/Result';
   import { onDestroy } from 'svelte';
+
+  import { createOpenRouterAiDecider } from './ai-decider';
 
   let game: GameState = $state(initialState);
   // 最近一次弃牌开枪结果，用于展示揭示过渡（存活退出标记 / 致死作废过渡）。
@@ -85,12 +86,13 @@
   );
   const canHumanAllIn = $derived(canHumanAct && game.stage !== 'river');
   const humanAllInPending = $derived(isAllInResponderPending('human'));
+  const humanPlayer = $derived(game.players.find((player) => player.isHuman));
   const lastShootLabel = $derived.by(() => {
     const shoot = lastShoot;
     if (!shoot) return null;
     const name = game.players.find((player) => player.id === shoot.playerId)?.name ?? '';
     const outcome = shoot.died ? '死亡' : '存活';
-    const suffix = shoot.died && game.status !== 'won' ? '·本手作废' : '';
+    const suffix = shoot.died && game.status === 'hand-resolved' ? '·本手作废' : '';
     return { text: `${name}开枪：${outcome}${suffix}`, died: shoot.died };
   });
   const lastShowdownLabel = $derived.by(() => {
@@ -123,7 +125,7 @@
     if (!thinkingPlayerId || !currentActor || currentActor.isHuman) return;
     const actorId = currentActor.id;
     const personality = currentActor.personality ?? 'balanced';
-    const decider = createWeightedAiDecider(personality);
+    const decider = createOpenRouterAiDecider(personality);
     let cancelled = false;
     const timeout = setTimeout(async () => {
       const decision = await decideForAi(decider, game, actorId);
@@ -134,7 +136,7 @@
           decision: decision.success,
         }).state;
       }
-    }, randomThinkDelayMs());
+    }, 0);
     return () => {
       cancelled = true;
       clearTimeout(timeout);
@@ -157,7 +159,7 @@
       .map((playerId) => {
         const player = game.players.find((candidate) => candidate.id === playerId);
         const personality = player?.personality ?? 'balanced';
-        const decider = createWeightedAiDecider(personality);
+        const decider = createOpenRouterAiDecider(personality);
         let cancelled = false;
         const timeout = setTimeout(async () => {
           const decision = await decideForAi(decider, game, playerId);
@@ -168,7 +170,7 @@
               decision: decision.success,
             }).state;
           }
-        }, randomThinkDelayMs());
+        }, 0);
         return {
           timeout,
           cancel: () => {
@@ -178,7 +180,7 @@
       });
   });
 
-  // All-in 等待的人类 7s 硬超时；AI 不走这个超时。
+  // All-in 等待的人类 10s 硬超时；AI 不走这个超时。
   $effect(() => {
     const wait = game.allInWait;
     const pending = isAllInResponderPending('human');
@@ -453,14 +455,17 @@
   function shouldRevealHoleCards(player: GameState['players'][number]) {
     if (player.isHuman) return true;
     if (player.folded) return false;
-    if (
-      (game.status === 'all-in-settle' || game.status === 'hand-resolved') &&
-      allInSettlement?.step === 'reveal' &&
-      allInSettlement.allInPlayerIds.includes(player.id) &&
-      player.alive
-    )
+    if (allInSettlement?.step === 'reveal' && allInSettlement.allInPlayerIds.includes(player.id))
       return true;
-    return game.status === 'showdown' || game.status === 'hand-resolved' || !player.alive;
+    if (game.showdown?.entries.some((entry) => entry.playerId === player.id)) return true;
+    return Boolean(
+      allInSettlement?.showdown?.entries.some((entry) => entry.playerId === player.id),
+    );
+  }
+
+  function isAiThinking(player: GameState['players'][number]) {
+    if (player.id === thinkingPlayerId) return true;
+    return Boolean(game.allInWait && isAllInResponderPending(player.id) && !player.isHuman);
   }
 
   function playerName(playerId: PlayerId) {
@@ -473,7 +478,7 @@
 <main class="bg-muted/40 text-foreground min-h-screen p-6">
   <section class="mx-auto flex max-w-5xl flex-col gap-6">
     <div class="space-y-2">
-      <p class="text-muted-foreground text-sm">德扑与俄式轮盘的桌面游戏</p>
+      <p class="text-muted-foreground text-sm">德扑与俄式轮盘的桌面游戏（仅供娱乐，du 🐶 biss）</p>
       <h1 class="text-3xl font-semibold tracking-tight">德州扑克俄轮版</h1>
     </div>
 
@@ -515,6 +520,36 @@
         </CardContent>
       </Card>
     {:else}
+      {#if game.status === 'human-dead'}
+        <AlertDialog open={true}>
+          <AlertDialogContent data-testid="human-dead-dialog">
+            <AlertDialogHeader>
+              <AlertDialogTitle>你已死亡</AlertDialogTitle>
+              <AlertDialogDescription>本局已结束</AlertDialogDescription>
+              {#if lastAllInShootLabel}
+                <Badge variant="destructive" data-testid="all-in-shoot-result">
+                  {lastAllInShootLabel}
+                </Badge>
+              {:else if lastAllInFoldShootLabel}
+                <Badge variant="destructive" data-testid="all-in-fold-shoot-result">
+                  {lastAllInFoldShootLabel}
+                </Badge>
+              {:else if lastShowdownLabel}
+                <Badge variant="destructive" data-testid="showdown-shoot-result">
+                  {lastShowdownLabel}
+                </Badge>
+              {:else if lastShootLabel}
+                <Badge variant="destructive" data-testid="human-dead-shoot-result">
+                  {lastShootLabel.text}
+                </Badge>
+              {/if}
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <Button onclick={startGame}>下一局</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      {/if}
       <div class="flex flex-wrap gap-2">
         <Badge>当前阶段：{currentStageName}</Badge>
         <Badge variant="secondary">当前行动者：{currentActorName}</Badge>
@@ -565,6 +600,10 @@
               <Badge variant="destructive" data-testid="hand-resolution-void">
                 {playerName(game.handResolution.voidPlayerId)} 死亡，本手作废
               </Badge>
+            {:else if game.handResolution?.kind === 'fold-win'}
+              <Badge variant="secondary" data-testid="hand-resolution-fold-win">
+                其他人全弃牌，{playerName(game.handResolution.handWinnerId)} 本手自动获胜
+              </Badge>
             {:else if game.handResolution?.kind === 'all-in'}
               <Badge variant="secondary" data-testid="hand-resolution-all-in">全押结算完成</Badge>
             {:else}
@@ -608,6 +647,38 @@
               <Badge variant="destructive" data-testid="all-in-countdown">
                 人类倒计时：{allInHumanRemaining}s
               </Badge>
+              <div class="space-y-3 pt-2">
+                <div>
+                  <p class="text-sm font-medium">你的底牌</p>
+                  <div class="flex gap-2 pt-1">
+                    {#each humanPlayer?.holeCards ?? [] as card (card.rank + card.suit)}
+                      <span
+                        class="bg-background rounded-lg border px-3 py-2 font-mono"
+                        data-testid="all-in-human-hole-card"
+                      >
+                        {cardText(card)}
+                      </span>
+                    {/each}
+                  </div>
+                </div>
+                <div>
+                  <p class="text-sm font-medium">当前公共牌</p>
+                  <div class="flex flex-wrap gap-2 pt-1">
+                    {#if game.communityCards.length === 0}
+                      <p class="text-muted-foreground text-sm">翻牌前尚无公共牌</p>
+                    {:else}
+                      {#each game.communityCards as card (card.rank + card.suit)}
+                        <span
+                          class="bg-background rounded-lg border px-3 py-2 font-mono"
+                          data-testid="all-in-community-card"
+                        >
+                          {cardText(card)}
+                        </span>
+                      {/each}
+                    {/if}
+                  </div>
+                </div>
+              </div>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogAction
@@ -623,7 +694,7 @@
         </AlertDialog>
       {/if}
 
-      {#if (game.status === 'all-in-settle' || game.status === 'hand-resolved') && allInSettlement}
+      {#if (game.status === 'all-in-settle' || game.status === 'hand-resolved' || game.status === 'human-dead') && allInSettlement}
         <Card data-testid="all-in-settle-panel">
           <CardHeader><CardTitle>全押结算时间轴</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -669,7 +740,7 @@
         </Card>
       {/if}
 
-      {#if (game.status === 'showdown' || game.status === 'hand-resolved') && game.showdown}
+      {#if (game.status === 'showdown' || game.status === 'hand-resolved' || game.status === 'human-dead') && game.showdown}
         <Card data-testid="showdown-panel">
           <CardHeader><CardTitle>摊牌</CardTitle></CardHeader>
           <CardContent class="space-y-3">
@@ -743,6 +814,10 @@
                 {#if player.allIn}<Badge>全押</Badge>{/if}
                 {#if isAllInResponderPending(player.id)}<Badge variant="outline">待响应</Badge>{/if}
                 {#if player.id === game.currentActorId}<Badge>行动中</Badge>{/if}
+                {#if isAiThinking(player)}<Spinner
+                    class="size-4"
+                    data-testid="thinking-spinner"
+                  />{/if}
               </div>
             </CardHeader>
             <CardContent class="space-y-3">

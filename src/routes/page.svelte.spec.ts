@@ -2,10 +2,84 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import { page } from 'vitest/browser';
 
+const remoteMock = vi.hoisted(() => {
+  type Action = 'call' | 'fold' | 'all-in';
+  type Personality = 'conservative' | 'balanced' | 'aggressive';
+  const weights: Record<Personality, Record<Action, number>> = {
+    conservative: { call: 0.25, fold: 0.65, 'all-in': 0.1 },
+    balanced: { call: 0.4, fold: 0.3, 'all-in': 0.3 },
+    aggressive: { call: 0.5, fold: 0.15, 'all-in': 0.35 },
+  };
+
+  const originalImplementation = async (request: {
+    personality: Personality;
+    legalActions: Action[];
+    input: { stage: string };
+  }) => {
+    // 远程传输 mock：复刻离线权重，只测试页面外部行为。
+    const allowed = new Set(request.legalActions);
+    const entries = Object.entries(weights[request.personality]).filter(
+      ([action]) =>
+        allowed.has(action as Action) && !(request.input.stage === 'river' && action === 'all-in'),
+    ) as [Action, number][];
+    const candidates = entries.length ? entries : [['fold', 1] as [Action, number]];
+    const total = candidates.reduce((sum, [, weight]) => sum + weight, 0);
+    let roll = Math.random() * total;
+    for (const [action, weight] of candidates) {
+      roll -= weight;
+      if (roll < 0) return { action };
+    }
+    return { action: candidates.at(-1)?.[0] ?? 'fold' };
+  };
+
+  const fn = vi.fn(originalImplementation);
+  return {
+    decideAiActionRemote: fn,
+    resetImplementation: () => fn.mockImplementation(originalImplementation),
+  };
+});
+
+vi.mock('./decide.remote', () => remoteMock);
+
 import Page from './+page.svelte';
+
+const flushTimers = async () => {
+  for (let count = 0; count < 20; count += 1) await vi.advanceTimersByTimeAsync(1);
+};
+
+const mockHumanLosesDeckShuffle = () => {
+  const rolls = [
+    0.7769, 0.7583, 0.7364, 0.71, 0.6778, 0.6375, 0.5857, 0.5167, 0.42, 0.275, 0.0333, 0.55,
+  ];
+  const random = vi.spyOn(Math, 'random');
+  for (const roll of rolls) random.mockReturnValueOnce(roll);
+  random.mockReturnValue(0);
+  return random;
+};
+
+// 让 AI 远程决策延迟指定毫秒，便于观察 All-in 等待中的 spinner 中间状态。
+const delayAiDecisions = (delayMs: number) => {
+  const original = remoteMock.decideAiActionRemote.getMockImplementation();
+  remoteMock.decideAiActionRemote.mockImplementation(async (request) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (!original) return { action: 'fold' };
+    return original(request);
+  });
+};
+
+// 按顺序强制返回 AI 决策动作与各自思考延迟（不经过性格权重与 Math.random）。
+const mockAiActions = (actions: Array<{ action: 'call' | 'fold' | 'all-in'; delayMs: number }>) => {
+  let index = 0;
+  remoteMock.decideAiActionRemote.mockImplementation(async () => {
+    const { action, delayMs } = actions[index++] ?? { action: 'fold' as const, delayMs: 0 };
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { action };
+  });
+};
 
 describe('首页', () => {
   afterEach(() => {
+    remoteMock.resetImplementation();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -43,7 +117,7 @@ describe('首页', () => {
     await expect.element(page.getByText('人类 在 翻牌前 选择 跟注')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
 
-    await vi.advanceTimersByTimeAsync(9000);
+    await flushTimers();
 
     await expect.element(page.getByText('当前阶段：翻牌')).toBeInTheDocument();
     await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
@@ -59,7 +133,7 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 3; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
 
     await expect.element(page.getByText('当前阶段：河牌')).toBeInTheDocument();
@@ -74,19 +148,23 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '跟注' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
-    await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时');
+    await expect.element(page.getByTestId('all-in-countdown')).toHaveTextContent('人类倒计时：10s');
     // 人类作为响应者时，全押/弃牌操作在 alert-dialog 中展示
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-response-all-in')).toBeEnabled();
     await expect.element(page.getByTestId('all-in-response-fold')).toBeEnabled();
     await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
+    // 弹窗内展示人类自己的 2 张底牌，翻牌前尚无公共牌，且不出现在座位的 AI 底牌揭示
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    await expect.element(page.getByText('翻牌前尚无公共牌')).toBeInTheDocument();
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
 
-    await vi.advanceTimersByTimeAsync(7000);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(10000);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=0 展示选择');
@@ -134,8 +212,7 @@ describe('首页', () => {
     await expect.element(page.getByTestId('all-in-response-fold')).not.toBeInTheDocument();
     expect(page.getByTestId('all-in-responder').elements()).toHaveLength(3);
 
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('人类：全押')).toBeInTheDocument();
@@ -148,15 +225,14 @@ describe('首页', () => {
     await expect.element(page.getByTestId('all-in-fold-shoot-empty')).toBeInTheDocument();
   });
 
-  it('All-in 亮牌前隐藏全押 AI，亮牌时仍隐藏弃牌 AI', async () => {
+  it('全押亮牌前隐藏全押 AI，亮牌时仍隐藏弃牌 AI', async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     render(Page);
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(3000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
@@ -171,15 +247,14 @@ describe('首页', () => {
     expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
   });
 
-  it('All-in t=6 有死亡但仍 ≥2 存活会暂停并清掉结果徽章', async () => {
+  it('全押 t=6 有死亡但仍 ≥2 存活会暂停并清掉结果徽章', async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
     render(Page);
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
     await vi.advanceTimersByTimeAsync(2500);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -211,7 +286,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '跟注' }).click();
-    await vi.advanceTimersByTimeAsync(5000);
+    await flushTimers();
 
     await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
     await page.getByTestId('all-in-response-fold').click();
@@ -222,7 +297,61 @@ describe('首页', () => {
     await expect.element(page.getByText('人类：弃牌')).toBeInTheDocument();
   });
 
-  it('All-in 弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
+  it('翻牌阶段人类响应全押时弹窗展示 3 张公共牌且不揭示 AI 底牌', async () => {
+    vi.useFakeTimers();
+    // 直接控制 AI 决策：翻牌前三家跟注，翻牌时 AI-1 全押触发人类响应。
+    mockAiActions([
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    // 翻牌阶段人类继续跟注，随后 AI-1 全押触发 All-in 等待
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('all-in-community-card').elements()).toHaveLength(3);
+    // 弹窗内不展示任何 AI 底牌（AI 底牌仍在座位隐藏）
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
+  });
+
+  it('转牌阶段人类响应全押时弹窗展示 4 张公共牌', async () => {
+    vi.useFakeTimers();
+    // 翻牌前、翻牌都三家跟注，转牌时 AI-1 全押触发人类响应。
+    mockAiActions([
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'call', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    expect(page.getByTestId('all-in-human-hole-card').elements()).toHaveLength(2);
+    expect(page.getByTestId('all-in-community-card').elements()).toHaveLength(4);
+    expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(0);
+  });
+
+  it('全押弃牌开枪后仅剩一人会短路到胜利并跳过亮牌', async () => {
     vi.useFakeTimers();
     // AI 全部弃牌且开枪 roll=0 → 三名 AI 死亡，人类直接胜利。
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -230,8 +359,7 @@ describe('首页', () => {
 
     await page.getByRole('button', { name: '开始游戏' }).click();
     await page.getByRole('button', { name: '全押' }).click();
-    await vi.advanceTimersByTimeAsync(3000);
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
     await expect.element(page.getByText('AI-1：弃牌')).toBeInTheDocument();
@@ -256,9 +384,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
     expect(page.getByTestId('ai-hole-card-revealed').elements()).toHaveLength(6);
@@ -298,7 +426,35 @@ describe('首页', () => {
     await expect.element(page.getByText('当前行动者：AI-1')).toBeInTheDocument();
   });
 
-  it('弃牌开枪致死则标记出局并作废本手，暂停等待开始下一手', async () => {
+  it('其余人全弃牌且无人阵亡 → 仅剩玩家本手自动获胜，暂停等待开始下一手', async () => {
+    vi.useFakeTimers();
+    // Math.random=0.55 落在保守/均衡/激进三种性格的弃牌区间交集 [0.5, 0.65)，
+    // 且 ≥1/8 死亡概率 → 3 名 AI 依次弃牌存活，仅剩人类活跃。
+    vi.spyOn(Math, 'random').mockReturnValue(0.55);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    for (let fold = 0; fold < 3; fold += 1) {
+      await flushTimers(); // 触发 0ms AI 思考 → 弃牌
+      await vi.advanceTimersByTimeAsync(2500); // 2.5s 弃牌开枪 → 存活推进
+    }
+
+    await expect.element(page.getByTestId('hand-resolved-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('hand-resolution-fold-win'))
+      .toHaveTextContent('其他人全弃牌，人类 本手自动获胜');
+    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeEnabled();
+    // 全员无人出局，未判整局胜利（无胜利屏）
+    expect(page.getByText('出局').elements()).toHaveLength(0);
+    expect(page.getByTestId('win-screen').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '开始下一手' }).click();
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+  });
+
+  it('人类弃牌致死会出现死亡弹窗，点击下一局后重置新局', async () => {
     vi.useFakeTimers();
     // roll=0 → 1/8 水位下致死
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -309,17 +465,119 @@ describe('首页', () => {
 
     await vi.advanceTimersByTimeAsync(2500);
 
-    await expect.element(page.getByTestId('fold-shoot-result')).toHaveTextContent('人类开枪：死亡');
-    // 人类出局，暂停在 hand-resolved，行动按钮不可用
-    expect(page.getByText('出局').elements()).toHaveLength(1);
-    await expect.element(page.getByRole('button', { name: '开始下一手' })).toBeInTheDocument();
-    await expect.element(page.getByRole('button', { name: '跟注' })).toBeDisabled();
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByText('你已死亡')).toBeInTheDocument();
+    await expect.element(page.getByText('本局已结束')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-shoot-result'))
+      .toHaveTextContent('人类开枪：死亡');
+    await expect.element(page.getByRole('button', { name: '下一局' })).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
 
-    await page.getByRole('button', { name: '开始下一手' }).click();
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
 
-    // 进下一手 preflop，其余 3 名存活玩家重开 ante=1
+    await expect.element(page.getByRole('alertdialog')).not.toBeInTheDocument();
     await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
-    expect(page.getByText('存活').elements()).toHaveLength(3);
+    await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
+    expect(page.getByText('本手下注：1 颗子弹').elements()).toHaveLength(4);
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('人类在摊牌输者开枪中死亡会停在死亡弹窗并可开下一局', async () => {
+    vi.useFakeTimers();
+    mockHumanLosesDeckShuffle();
+    mockAiActions(Array.from({ length: 12 }, () => ({ action: 'call', delayMs: 0 })));
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    for (let stage = 0; stage < 4; stage += 1) {
+      await page.getByRole('button', { name: '跟注' }).click();
+      await flushTimers();
+    }
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('showdown-shoot-result'))
+      .toHaveTextContent(/输者开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+    expect(page.getByText('存活').elements()).toHaveLength(4);
+  });
+
+  it('人类在 All-in t=2.5 弃牌开枪死亡会清掉后续亮牌与比牌定时器', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    mockAiActions([
+      { action: 'all-in', delayMs: 0 },
+      { action: 'fold', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+    await flushTimers();
+    await page.getByTestId('all-in-response-fold').click();
+    await flushTimers();
+    await expect.element(page.getByTestId('all-in-settle-step')).toHaveTextContent('t=0 展示选择');
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('all-in-fold-shoot-result'))
+      .toHaveTextContent(/全押弃牌开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(page.getByTestId('all-in-reveal').elements()).toHaveLength(0);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
+  });
+
+  it('人类在 All-in t=6 比牌开枪死亡会停在死亡弹窗并可开下一局', async () => {
+    vi.useFakeTimers();
+    const random = mockHumanLosesDeckShuffle();
+    mockAiActions([
+      { action: 'all-in', delayMs: 0 },
+      { action: 'fold', delayMs: 0 },
+      { action: 'all-in', delayMs: 0 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '全押' }).click();
+    await flushTimers();
+    random.mockReturnValueOnce(0.999);
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect.element(page.getByTestId('all-in-reveal')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    await expect.element(page.getByRole('alertdialog')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-settle-panel')).toBeInTheDocument();
+    await expect
+      .element(page.getByTestId('human-dead-dialog').getByTestId('all-in-shoot-result'))
+      .toHaveTextContent(/全押输者开枪：.*人类死亡/);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect.element(page.getByTestId('hand-resolved-panel')).not.toBeInTheDocument();
+
+    await page.getByRole('button', { name: '下一局' }).click();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect.element(page.getByText('当前阶段：翻牌前')).toBeInTheDocument();
   });
 
   it('摊牌后有存活者会暂停等待开始下一手', async () => {
@@ -331,9 +589,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
 
@@ -360,9 +618,9 @@ describe('首页', () => {
     await page.getByRole('button', { name: '开始游戏' }).click();
     for (let stage = 0; stage < 4; stage += 1) {
       await page.getByRole('button', { name: '跟注' }).click();
-      await vi.advanceTimersByTimeAsync(9000);
+      await flushTimers();
     }
-    await vi.advanceTimersByTimeAsync(0);
+    await flushTimers();
 
     await expect.element(page.getByTestId('showdown-panel')).toBeInTheDocument();
 
@@ -393,6 +651,96 @@ describe('首页', () => {
       .map((card) => card.textContent);
     expect(humanCards).toHaveLength(2);
     expect(humanCards).not.toEqual(['A♠', 'A♥']);
+  });
+
+  it('正常行动轮轮到 AI 时该 AI 座位出现 spinner，轮到人类时无 spinner', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    // 人类回合，无 AI 思考 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '跟注' }).click();
+    await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
+    // 仅当前行动的 AI 座位有 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    await flushTimers();
+    await expect.element(page.getByText('当前行动者：人类')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('All-in 等待阶段每个待响应 AI 座位显示 spinner，响应完后消失', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    delayAiDecisions(50);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    // 推进到 AI-1 完成全押并触发 All-in 等待（AI-2/AI-3 尚未响应）
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    // 待响应 AI 为 AI-2、AI-3，共 2 个 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
+
+    // 再推进让 AI-2/AI-3 响应完，spinner 应全部消失
+    await vi.advanceTimersByTimeAsync(100);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('All-in 等待阶段某个 AI 弃牌响应后其 spinner 消失，其他 AI 仍转动', async () => {
+    vi.useFakeTimers();
+    // AI-1 快速全押触发等待；AI-2 较慢弃牌；AI-3 最慢全押，便于观察中间状态。
+    mockAiActions([
+      { action: 'all-in', delayMs: 50 },
+      { action: 'fold', delayMs: 100 },
+      { action: 'all-in', delayMs: 500 },
+    ]);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    await page.getByRole('button', { name: '跟注' }).click();
+
+    // 推进到 AI-1 已全押、All-in 等待已触发，AI-2/AI-3 均在思考
+    await vi.advanceTimersByTimeAsync(100);
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
+
+    // 再推进让 AI-2 弃牌响应，其 spinner 消失；AI-3 仍在思考
+    await vi.advanceTimersByTimeAsync(150);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    // 再推进让 AI-3 全押，spinner 全部消失
+    await vi.advanceTimersByTimeAsync(500);
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+  });
+
+  it('人类座位在任何状态下都不出现思考 spinner', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    delayAiDecisions(50);
+    render(Page);
+
+    await page.getByRole('button', { name: '开始游戏' }).click();
+    // 人类回合无 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: '跟注' }).click();
+    // AI-1 行动轮有 spinner，但不是人类座位
+    await expect.element(page.getByText('AI-1 正在思考…')).toBeInTheDocument();
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(1);
+
+    // 推进到 AI-1 全押进入 All-in 等待，人类自己也待响应但无 spinner
+    await vi.advanceTimersByTimeAsync(50);
+    await expect.element(page.getByTestId('all-in-wait-panel')).toBeInTheDocument();
+    await expect.element(page.getByTestId('all-in-countdown')).toBeInTheDocument();
+    // 只有 AI-2、AI-3 两个 AI 待响应座位有 spinner
+    expect(page.getByTestId('thinking-spinner').elements()).toHaveLength(2);
   });
 
   it('AI 性格标识不对玩家展示', async () => {
