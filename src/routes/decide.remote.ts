@@ -1,5 +1,5 @@
 import { query } from '$app/server';
-import type { Decision, DecisionInput, Personality } from '$lib/engine';
+import type { Decision, DecisionInput, Personality, PlayerId } from '$lib/engine';
 import { makeOpenrouterAdapter } from '$lib/server/ai/model';
 import { chat } from '@tanstack/ai';
 import * as S from 'effect/Schema';
@@ -17,20 +17,36 @@ export type AiDecisionRequest = {
 export type AiDecisionResponse = { action: Decision['action'] };
 
 export const decideAiActionRemote = query(AiDecisionReqSchema, async (request) => {
+  const meId = deriveMeId(request.input, request.personality);
   const response = await chat({
     adapter: makeOpenrouterAdapter(),
     systemPrompts: [personalityPrompt(request.personality)],
-    messages: [{ role: 'user', content: visibleGameMessage(request.input) }],
+    messages: [{ role: 'user', content: visibleGameMessage(request.input, meId) }],
     outputSchema: S.Struct({
       action: S.Literals(request.legalActions),
     }).pipe(S.toStandardJSONSchemaV1),
   });
 
-  console.log({response})
-
   // 薄管道：不在远程端校验合法性、不重试、不兜底，回退单点留给 decideForAi。
   return response;
 });
+
+function deriveMeId(
+  input: {
+    readonly alivePlayers: readonly {
+      readonly id: PlayerId;
+      readonly isHuman: boolean;
+      readonly personality?: Personality;
+    }[];
+  },
+  personality: Personality,
+): PlayerId {
+  // 每局三种性格唯一分配给三个 AI，请求决策的 AI 必在 alivePlayers 中。
+  const me = input.alivePlayers.find(
+    (player) => !player.isHuman && player.personality === personality,
+  );
+  return me!.id;
+}
 
 function personalityPrompt(personality: Personality) {
   const style: Record<Personality, string> = {
@@ -40,4 +56,3 @@ function personalityPrompt(personality: Personality) {
   };
   return `${style[personality]} 你正在玩德州扑克俄轮版。只返回 JSON，不要解释。`;
 }
-
